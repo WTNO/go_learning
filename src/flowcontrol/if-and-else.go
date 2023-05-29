@@ -5,7 +5,7 @@ import (
 	"math"
 )
 
-func pow(x, n, lim float64) float64 {
+func pow2(x, n, lim float64) float64 {
 	if v := math.Pow(x, n); v < lim {
 		return v
 	} else {
@@ -16,7 +16,7 @@ func pow(x, n, lim float64) float64 {
 
 func main() {
 	fmt.Println(
-		pow(3, 2, 10),
-		pow(3, 3, 20),
+		pow2(3, 2, 10),
+		pow2(3, 3, 20),
 	)
 }
