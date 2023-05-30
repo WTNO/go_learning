@@ -12,7 +12,8 @@ import (
 // ColorModel 应当返回 color.RGBAModel。
 // At 应当返回一个颜色。上一个图片生成器的值 v 对应于此次的 color.RGBA{v, v, 255, 255}。
 
-type Image struct{}
+type Image struct {
+}
 
 func (im Image) Bounds() image.Rectangle {
 	return image.Rect(0, 0, 100, 100)
