@@ -33,6 +33,7 @@ func Walkn(t *tree.Tree, ch chan int) {
 	if t == nil {
 		return
 	}
+
 	Walkn(t.Left, ch)
 	ch <- t.Value
 	Walkn(t.Right, ch)
