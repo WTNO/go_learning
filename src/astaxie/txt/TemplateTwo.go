@@ -9,7 +9,7 @@ type Friend struct {
 	Fname string
 }
 
-type Person struct {
+type Person2 struct {
 	UserName string
 	Emails   []string
 	Friends  []*Friend
@@ -29,8 +29,10 @@ func main() {
 			{{end}}
 			{{end}}
 			`)
-	p := Person{UserName: "Astaxie",
-		Emails:  []string{"astaxie@beego.me", "astaxie@gmail.com"},
-		Friends: []*Friend{&f1, &f2}}
+	p := Person2{
+		UserName: "Astaxie",
+		Emails:   []string{"astaxie@beego.me", "astaxie@gmail.com"},
+		Friends:  []*Friend{&f1, &f2},
+	}
 	t.Execute(os.Stdout, p)
 }
