@@ -21,7 +21,7 @@ func main() {
 	t := template.New("fieldname example")
 	t, _ = t.Parse(`hello {{.UserName}}!
 			{{range .Emails}}
-				an email {{.}}
+				an email {{. | html}}
 			{{end}}
 			{{with .Friends}}
 			{{range .}}
