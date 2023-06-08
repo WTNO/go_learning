@@ -23,12 +23,13 @@ func main() {
 	src := string(body)
 
 	//将HTML标签全转换成小写
-	re, _ := regexp.Compile(`<[\S\s]+?>`)
+	re, _ := regexp.Compile(`<[\S\s]+?>`) // [\s\S]：匹配所有。\s 是匹配所有空白符，包括换行，\S 非空白符，不包括换行。
 	src = re.ReplaceAllStringFunc(src, strings.ToLower)
 
 	//去除STYLE
 	re, _ = regexp.Compile(`<style[\S\s]+?</style>`)
 	src = re.ReplaceAllString(src, "")
+
 	//去除HTMLUnscape的STYLE
 	re, _ = regexp.Compile(`&lt;style[\S\s]+?&lt;/style&gt;`)
 	src = re.ReplaceAllString(src, "")
@@ -36,6 +37,7 @@ func main() {
 	//去除SCRIPT
 	re, _ = regexp.Compile(`<script[\S\s]+?</script>`)
 	src = re.ReplaceAllString(src, "")
+
 	//去除HTMLUnsapce的SCRIPT
 	re, _ = regexp.Compile(`&lt;script[\S\s]+?&lt;/script&gt;`)
 	src = re.ReplaceAllString(src, "")
