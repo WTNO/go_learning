@@ -33,8 +33,8 @@ func main() {
 	io.WriteString(h, "123456")
 
 	//pwmd5等于e10adc3949ba59abbe56e057f20f883e
-	pwmd5 := fmt.Sprintf("%x", h.Sum(nil))
-	//pwmd5 := string(h.Sum(nil)) // 为什么这里是乱码？
+	pwmd5 := fmt.Sprintf("%x", h.Sum(nil)) // %x	表示为十六进制，使用a-f
+	//pwmd5 := string(h.Sum(nil)) // 相当于fmt.Sprintf("%s", h.Sum(nil))
 	fmt.Println(pwmd5)
 
 	//指定两个 salt： salt1 = @#$%   salt2 = ^&*()
