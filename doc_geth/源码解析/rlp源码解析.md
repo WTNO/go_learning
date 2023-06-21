@@ -336,6 +336,154 @@ structFields函数遍历所有的字段，然后针对每一个字段调用`info
 > TODO：这里需要学习一下go的反射？
 
 ### **编码器 encode.go**
+首先定义了空字符串和空List的值，分别是 `0x80`和`0xC0`。 注意，整形的0值的对应值也是`0x80`。这个在黄皮书上面是没有看到有定义的。 然后定义了一个接口类型给别的类型实现 EncodeRLP
+```go
+var (
+	// 常见的编码值。在实现 EncodeRLP 时很有用。
+
+	// EmptyString 是空字符串的编码。
+	EmptyString = []byte{0x80}
+	// EmptyList 是空列表的编码。
+	EmptyList = []byte{0xC0}
+)
+
+// Encoder 由需要自定义编码规则或想要编码私有字段的类型实现。
+type Encoder interface {
+    // EncodeRLP 应该将其接收器的 RLP 编码写入 w。如果实现是指针方法，则也可以对空指针调用。
+    //
+    // 实现应该生成有效的RLP。目前写入的数据没有被验证，但未来的版本可能会进行验证。 
+    // 建议仅写入一个值，但也允许写入多个值或不写入任何值。
+    EncodeRLP(io.Writer) error
+}
+```
+
+然后定义了一个最重要的方法， 大部分的EncodeRLP方法都是直接调用了这个方法Encode方法。  
+这个方法首先获取了一个`*encBuffer`对象。 然后调用这个对象的`encode`方法。`encode`方法中，首先获取了对象的反射类型，根据反射类型获取它的编码器，然后调用编码器的writer方法。 这个就跟上面谈到的typeCache联系到一起了。
+```go
+// Encode函数将val的RLP编码写入w。请注意，Encode函数在某些情况下可能会执行许多小写操作。建议将w设置为缓冲。
+//
+// 请查看编码规则的包级文档。
+func Encode(w io.Writer, val interface{}) error {
+	// Optimization: reuse *encBuffer when called by EncodeRLP.
+	if buf := encBufferFromWriter(w); buf != nil {
+		return buf.encode(val)
+	}
+
+	buf := getEncBuffer()
+	defer encBufferPool.Put(buf)
+	if err := buf.encode(val); err != nil {
+		return err
+	}
+	return buf.writeTo(w)
+}
+
+func (buf *encBuffer) encode(val interface{}) error {
+    rval := reflect.ValueOf(val)
+    writer, err := cachedWriter(rval.Type())
+    if err != nil {
+		return err
+    }
+    return writer(rval, buf)
+}
+```
+
+#### encBuffer的介绍
+`encBuffer`出现在Encode方法，和很多Writer方法中。顾名思义，这个是在encode的过程中充当buffer的作用。下面先看看`encBuffer`的定义。
+```go
+type encBuffer struct {
+	str     []byte     // 字符串数据，包含除列表标题以外的所有内容
+	lheads  []listhead // 所有列表标题
+	lhsize  int        // 所有编码列表标题的大小之和
+	sizebuf [9]byte    // 用于无符号整数编码的辅助缓冲区
+}
+
+type listhead struct {
+    offset int // 列表标题在字符串数据中的索引
+    size   int // 编码数据的总大小（包括列表标题）
+}
+```
+
+从注释可以看到， str字段包含了所有的内容，除了列表的头部。 列表的头部记录在lheads字段中。 lhsize字段记录了lheads的长度， sizebuf是9个字节大小的辅助buffer，专门用来处理uint的编码的。 listhead由两个字段组成， offset字段记录了列表数据在str字段的哪个位置， size字段记录了包含列表头的编码后的数据的总长度。可以看到下面的图。
+<img src="../img/rlp_6.png">
+
+对于普通的类型，比如字符串，整形，bool型等数据，就是直接往str字段里面填充就行了。 但是对于结构体类型的处理， 就需要特殊的处理方式了。可以看看上面提到过的makeStructWriter方法。
+
+`makeStructWriter`函数的代码中体现了处理结构体数据的特殊处理方法，就是首先调用`w.list()`方法，处理完毕之后再调用`listEnd(lh)`方法。采用这种方式的原因是我们在刚开始处理结构体的时候，并不知道处理后的结构体的长度有多长，因为需要根据结构体的长度来决定头的处理方式(回忆一下黄皮书里面结构体的处理方式)，所以我们在处理前记录好str的位置，然后开始处理每个字段，处理完之后在看一下str的数据增加了多少就知道处理后的结构体长度有多长了。
+
+```go
+// list函数将一个新的列表标题添加到标题栈中，并返回该标题的索引。
+// 在对列表内容进行编码后，请使用该索引调用listEnd函数。
+func (buf *encBuffer) list() int {
+	buf.lheads = append(buf.lheads, listhead{offset: len(buf.str), size: buf.lhsize})
+	return len(buf.lheads) - 1
+}
+
+func (buf *encBuffer) listEnd(index int) {
+	lh := &buf.lheads[index]
+	lh.size = buf.size() - lh.offset - lh.size // lh.size记录了list开始的时候的队列头应该占用的长度w.size()返回的是str的长度加上lhsize
+    if lh.size < 56 {
+		buf.lhsize++ // length encoded into kind tag
+	} else {
+		buf.lhsize += 1 + intsize(uint64(lh.size))
+	}
+}
+
+func (buf *encBuffer) size() int {
+    return len(buf.str) + buf.lhsize
+}
+```
+
+然后我们可以看看encbuf最后的处理逻辑，会对listhead进行处理，组装成完整的RLP数据
+```go
+func (w *encbuf) toBytes() []byte {
+	out := make([]byte, w.size())
+	strpos := 0
+	pos := 0
+	for _, head := range w.lheads {
+		// write string data before header
+		n := copy(out[pos:], w.str[strpos:head.offset])
+		pos += n
+		strpos += n
+		// write the header
+		enc := head.encode(out[pos:])
+		pos += len(enc)
+	}
+	// copy string data after the last list header
+	copy(out[pos:], w.str[strpos:])
+	return out
+}
+```
+> 没找到这部分代码以及调用的地方
+
+#### writer介绍
+剩下的流程其实比较简单了。 就是根据黄皮书针把每种不同的数据填充到encbuf里面去。
+```go
+func writeRawValue(val reflect.Value, w *encBuffer) error {
+    w.str = append(w.str, val.Bytes()...)
+    return nil
+}
+
+func writeString(val reflect.Value, w *encBuffer) error {
+    s := val.String()
+    if len(s) == 1 && s[0] <= 0x7f {
+        // fits single byte, no string header
+        w.str = append(w.str, s[0])
+    } else {
+        w.encodeStringHeader(len(s))
+        w.str = append(w.str, s...)
+    }
+    return nil
+}
+```
+
+
+
+
+
+
+
+
+
 
 
 
