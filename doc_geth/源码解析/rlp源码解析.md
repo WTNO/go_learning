@@ -132,13 +132,26 @@ type typeCache struct {
 
 下面是用户如何获取编码器和解码器的函数：
 ```go
+// 获取编码器和解码器的函数
+func (c *typeCache) info(typ reflect.Type) *typeinfo {
+    key := typekey{Type: typ}
+    // 从typeCache获取
+    if info := c.cur.Load().(map[typekey]*typeinfo)[key]; info != nil {
+        return info
+    }
+    
+    // 编解码不在typeCache中，需要创建该typ对应的编解码函数
+    return c.generate(typ, rlpstruct.Tags{})
+}
+
+// 新建typ对应的编解码函数
 func (c *typeCache) generate(typ reflect.Type, tags rlpstruct.Tags) *typeinfo {
 	c.mu.Lock() // 加锁保护
 	defer c.mu.Unlock()
 
     // 将传入的typ和tags封装为typekey类型
 	cur := c.cur.Load().(map[typekey]*typeinfo) // 类型断言还是其他语法糖？
-    // 成功获取到typ对应的编解码函数则直接返回
+    // 其他的线程可能已经创建成功了， 那么我们直接获取到信息然后返回
 	if info := cur[typekey{typ, tags}]; info != nil {
 		return info
 	}
@@ -160,17 +173,169 @@ func (c *typeCache) generate(typ reflect.Type, tags rlpstruct.Tags) *typeinfo {
 }
 ```
 
+`infoWhileGenerating`是生成对应类型的编解码器函数
+```go
+func (c *typeCache) infoWhileGenerating(typ reflect.Type, tags rlpstruct.Tags) *typeinfo {
+	key := typekey{typ, tags}
+	if info := c.next[key]; info != nil {
+		return info
+	}
+	// 在生成之前将一个虚拟值放入缓存中。如果生成器尝试查找自身，它将获得虚拟值并且不会递归调用自身。
+	info := new(typeinfo)
+	c.next[key] = info
+	info.generate(typ, tags)
+	return info
+}
 
+func (i *typeinfo) generate(typ reflect.Type, tags rlpstruct.Tags) {
+	i.decoder, i.decoderErr = makeDecoder(typ, tags)
+	i.writer, i.writerErr = makeWriter(typ, tags)
+}
+```
 
+`makeDecoder`的处理逻辑和`makeWriter`的处理逻辑大致差不多， 这里我只贴出makeWriter的处理逻辑，
+```go
+// makeWriter 为给定的类型创建一个写入器函数。
+func makeWriter(typ reflect.Type, ts rlpstruct.Tags) (writer, error) {
+	kind := typ.Kind()
+	switch {
+	case typ == rawValueType:
+		return writeRawValue, nil
+	case typ.AssignableTo(reflect.PtrTo(bigInt)):
+		return writeBigIntPtr, nil
+	case typ.AssignableTo(bigInt):
+		return writeBigIntNoPtr, nil
+	case typ == reflect.PtrTo(u256Int):
+		return writeU256IntPtr, nil
+	case typ == u256Int:
+		return writeU256IntNoPtr, nil
+	case kind == reflect.Ptr:
+		return makePtrWriter(typ, ts)
+	case reflect.PtrTo(typ).Implements(encoderInterface):
+		return makeEncoderWriter(typ), nil
+	case isUint(kind):
+		return writeUint, nil
+	case kind == reflect.Bool:
+		return writeBool, nil
+	case kind == reflect.String:
+		return writeString, nil
+	case kind == reflect.Slice && isByte(typ.Elem()):
+		return writeBytes, nil
+	case kind == reflect.Array && isByte(typ.Elem()):
+		return makeByteArrayWriter(typ), nil
+	case kind == reflect.Slice || kind == reflect.Array:
+		return makeSliceWriter(typ, ts)
+	case kind == reflect.Struct:
+		return makeStructWriter(typ)
+	case kind == reflect.Interface:
+		return writeInterface, nil
+	default:
+		return nil, fmt.Errorf("rlp: type %v is not RLP-serializable", typ)
+	}
+}
+```
 
+可以看到就是一个switch case,根据类型来分配不同的处理函数。 这个处理逻辑还是很简单的。针对简单类型很简单，根据黄皮书上面的描述来处理即可。 不过对于结构体类型的处理还是挺有意思的，而且这部分详细的处理逻辑在黄皮书上面也是找不到的。
+```go
+type field struct {
+	index    int
+	info     *typeinfo
+	optional bool
+}
 
+func makeStructWriter(typ reflect.Type) (writer, error) {
+	fields, err := structFields(typ) // 解析结构体类型中所有公共字段的 typeinfo。
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range fields {
+        // f是field结构，f.info是typeinfo的指针
+        // 这里意思是如果结构体中某一种type的typeinfo报错了，直接返回
+		if f.info.writerErr != nil {
+			return nil, structFieldError{typ, f.index, f.info.writerErr}
+		}
+	}
 
+	var writer writer
+	firstOptionalField := firstOptionalField(fields) // 返回具有“optional”标签的第一个字段的索引。
+	if firstOptionalField == len(fields) {
+		// 这是没有任何可选字段的结构体的写入器函数。
+		writer = func(val reflect.Value, w *encBuffer) error {
+			lh := w.list()
+			for _, f := range fields {
+				if err := f.info.writer(val.Field(f.index), w); err != nil {
+					return err
+				}
+			}
+			w.listEnd(lh)
+			return nil
+		}
+	} else {
+		// 如果有任何可选字段，写入器需要执行额外的检查来确定输出列表的长度。
+		writer = func(val reflect.Value, w *encBuffer) error {
+			lastField := len(fields) - 1
+			for ; lastField >= firstOptionalField; lastField-- {
+				if !val.Field(fields[lastField].index).IsZero() {
+					break
+				}
+			}
+			lh := w.list()
+			for i := 0; i <= lastField; i++ {
+				if err := fields[i].info.writer(val.Field(fields[i].index), w); err != nil {
+					return err
+				}
+			}
+			w.listEnd(lh)
+			return nil
+		}
+	}
+	return writer, nil
+}
+```
 
+这个函数定义了结构体的编码方式，通过structFields方法得到了所有的字段的编码器，然后返回一个方法，这个方法遍历所有的字段，每个字段调用其编码器方法。
+```go
+// 解析结构体类型中所有公共字段的 typeinfo。
+func structFields(typ reflect.Type) (fields []field, err error) {
+	// 将字段转换为 rlpstruct.Field。
+	var allStructFields []rlpstruct.Field
+	for i := 0; i < typ.NumField(); i++ {
+		rf := typ.Field(i)
+		allStructFields = append(allStructFields, rlpstruct.Field{
+			Name:     rf.Name,
+			Index:    i,
+			Exported: rf.PkgPath == "",
+			Tag:      string(rf.Tag),
+			Type:     *rtypeToStructType(rf.Type, nil),
+		})
+	}
 
+	// 过滤/验证字段。
+	structFields, structTags, err := rlpstruct.ProcessFields(allStructFields)
+	if err != nil {
+		if tagErr, ok := err.(rlpstruct.TagError); ok {
+			tagErr.StructType = typ.String()
+			return nil, tagErr
+		}
+		return nil, err
+	}
 
+	// 解析typeinfo.
+	for i, sf := range structFields {
+		typ := typ.Field(sf.Index).Type
+		tags := structTags[i]
+		info := theTC.infoWhileGenerating(typ, tags)
+		fields = append(fields, field{sf.Index, info, tags.Optional})
+	}
+	return fields, nil
+}
+```
 
+structFields函数遍历所有的字段，然后针对每一个字段调用`infoWhileGenerating`。 可以看到这是一个递归的调用过程。 上面的代码中有一个需要注意的是`rf.PkgPath == ""`，这个用于判断字段是否是导出字段， 所谓的导出字段就是说以大写字母开头命令的字段。
 
+> TODO：这里需要学习一下go的反射？
 
+### **编码器 encode.go**
 
 
 
