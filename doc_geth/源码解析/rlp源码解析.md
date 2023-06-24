@@ -14,8 +14,8 @@ RLP是Recursive Length Prefix的简写。是以太坊中的序列化方法，以
 对于所有B类型的字节数组。我们定义了如下的处理规则。
 
 - 如果字节数组只包含一个字节，而且这个字节的大小小于128，那么不对数据进行处理，处理结果就是原数据
-- 如果字节数组的长度小于56，那么处理结果就等于在原始数据前面加上（128+字节数据的长度)的前缀。
-- 如果不是上面两种情况，那么处理结果就等于在原始数据前面加上原始数据长度的大端表示，然后在前面加上（183 + 原始数据大端表示的长度)
+- 如果字节数组的长度小于56，那么处理结果就等于在原始数据前面加上（128+字节数据的长度)的前缀。这样第一个字节的表达范围是[0x80,0x80+55=0xb7]。
+- 如果不是上面两种情况，那么处理结果就等于在原始数据前面加上原始数据长度的大端表示，然后在前面加上（183 + 原始数据大端表示的长度)，其前缀等于常量 0xb7 与字节数组长度的最小长度值之和加上字节数组长度大端字节值。第一个字节范围是[0xb7+1,0xbf]。比如，编码一个长度为256（$2^8$ = 0x100）的字符串时，因 256 需要至少 2 个字节存储，其高位字节为 0x10，因此RLP 编码输出为 [ 0xb7+ 2, 0x01,0x00,字节内容…]。
 
 下面使用公式化的语言来表示
 
@@ -66,6 +66,90 @@ RLP是Recursive Length Prefix的简写。是以太坊中的序列化方法，以
 ![image](../img/rlp_5.png)
 
 当解析RLP数据的时候。如果刚好需要解析整形数据， 这个时候遇到了前导00， 这个时候需要当作异常情况经行处理。
+
+### 示例
+```go
+package main
+
+import (
+	"fmt"
+	"math/big"
+	"os"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rlp"
+)
+
+func toBig(v string) *big.Int {
+	b, ok := new(big.Int).SetString(v, 10)
+	if !ok {
+		panic("bad big.Int string")
+	}
+	return b
+}
+
+func main() {
+
+	items := []interface{}{
+		uint64(333013),
+		common.FromHex("0xfb8f2d4ae37582cb7ae307196d6e789b7f8ccb665d34ac77000000000"),
+		toBig("37788494754494904754064770007423869431791776276838145493898599251081614922324"),
+		[]interface{}{
+			uint64(131231012),
+			"交易扩展信息",
+		},
+	}
+
+	b, err := rlp.EncodeToBytes(items)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Println("RLP编码输出：\n", common.Bytes2Hex(b))
+
+	for i, v := range items {
+		b, err := rlp.EncodeToBytes(v)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		fmt.Printf("items[%d]=RLP(%v)=%s\n", i, v, common.Bytes2Hex(b))
+		if list, ok := v.([]interface{}); ok {
+			for i, v := range list {
+				b, err := rlp.EncodeToBytes(v)
+				if err != nil {
+					fmt.Println(err)
+					os.Exit(1)
+				}
+				fmt.Printf("\t\t [%d]=RLP(%v)=%s\n", i, v, common.Bytes2Hex(b))
+			}
+		}
+	}
+}
+```
+
+执行实例，我们可以得到输出结果。分别输出了 items 的 RLP 编码结构以及 items 中所有元素单独的RLP 编码结果。
+
+```
+RLP编码输出：
+ f85c830514d59d0fb8f2d4ae37582cb7ae307196d6e789b7f8ccb665d34ac77000000000a0538b87b3af985c8f03a7bd0785ef8d087f833a1a56312ce3c67d40b292d51254d88407d26d2492e4baa4e69893e689a9e5b195e4bfa1e681af
+items[0]=RLP(333013)=830514d5
+items[1]=RLP([15 184 242 212 174 55 88 44 183 174 48 113 150 214 231 137 183 248 204 182 101 211 74 199 112 0 0 0 0])=9d0fb8f2d4ae37582cb7ae307196d6e789b7f8ccb665d34ac77000000000
+items[2]=RLP(37788494754494904754064770007423869431791776276838145493898599251081614922324)=a0538b87b3af985c8f03a7bd0785ef8d087f833a1a56312ce3c67d40b292d51254
+items[3]=RLP([131231012 交易扩展信息])=d88407d26d2492e4baa4e69893e689a9e5b195e4bfa1e681af
+		 [0]=RLP(131231012)=8407d26d24
+		 [1]=RLP(交易扩展信息)=92e4baa4e69893e689a9e5b195e4bfa1e681af
+```
+
+RLP 编码 items 时，所有元素都可以转换为字节数组。将其元素作为叶子转换为字节数组后，再将各项输出根据子方法2 的规则拼接成最终 RLP 编码结果。
+
+<img src="../img/2019-12-28-0-50-55.webp">
+
+下图是本示例的 RLP 编码计算过程。先依次 RLP 编码 items[0]、items[1]、items[2]和 items[3]。 因为 items[3] 并非字节数组，将使用子方法2处理。
+
+<img src="../img/2019-12-28-0-54-39.webp">
+
+items[3]的两个子项 RLP 拼接后的值为0x8407d26d2492e4baa4e69893e689a9e5b195e4bfa1e681af， 占用 24 字节，因此 items[3] 的前缀为 0xC0+24=0xd8。 而items[0]到 items[3] 的各项 RLP 拼接后的字节数组长度为 占用 92 个字节，因此 items 的前缀为 [0xf7+1,92]。
 
 ### **总结**
 RLP把所有的数据看成两类数据的组合， 一类是字节数组， 一类是类似于List的数据结构。 我理解这两类基本包含了所有的数据结构。 比如用得比较多的struct。 可以看成是一个很多不同类型的字段组成的List
@@ -631,7 +715,7 @@ type Stream struct {
 
 ~~Stream的`List()`方法，当调用List方法的时候。我们先调用Kind方法获取类型和长度，如果类型不匹配那么就抛出错误，然后我们把一个listpos对象压入到堆栈，这个对象是关键。 这个对象的pos字段记录了当前这个list已经读取了多少字节的数据， 所以刚开始的时候肯定是0. size字段记录了这个list对象一共需要读取多少字节数据。这样我在处理后续的每一个字段的时候，每读取一些字节，就会增加pos这个字段的值，处理到最后会对比pos字段和size字段是否相等，如果不相等，那么会抛出异常。~~
 
-Stream的`List()`方法，当调用List方法的时候。我们先调用Kind方法获取输入流中下一个值的类型和长度，如果类型不匹配那么就抛出错误.然后调用`listLimit`获取最内层列表中剩余的数据量，从外部列表中减去内部列表的大小，并将更新到栈中顶部第一个元素(也就是数组最后一个)。然后将最内部列表的大小压入栈。
+Stream的`List()`方法，当调用List方法的时候。我们先调用Kind方法获取输入流中下一个值的类型和长度，如果类型不匹配那么就抛出错误(struct被抽象为List).然后调用`listLimit`获取最内层列表中剩余的数据量，从外部列表中减去内部列表的大小，并将更新到栈中顶部第一个元素(也就是数组最后一个)。然后将最内部列表的大小压入栈。
 ```go
 // List函数开始解码一个RLP列表。如果输入不包含列表，则返回的错误将是ErrExpectedList。当到达列表的结尾时，任何Stream操作都将返回EOL。
 func (s *Stream) List() (size uint64, err error) {
