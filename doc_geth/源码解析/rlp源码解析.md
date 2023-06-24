@@ -579,7 +579,7 @@ func makeStructDecoder(typ reflect.Type) (decoder, error) {
 
 下面在看<font color="pink">字符串的解码过程</font>，因为不同长度的字符串有不同方式的编码，我们可以通过前缀的不同来获取字符串的类型， 这里我们通过`s.Kind()`方法获取当前需要解析的类型和长度，如果是Byte类型，那么直接返回Byte的值， 如果是String类型那么读取指定长度的值然后返回。 这就是kind()方法的用途。
 ```go
-// TODO:为什么调用decodeString的时候没有传递参数
+// TODO:为什么调用decodeString的时候没有传递参数：因为这里是函数作为返回结果
 func decodeString(s *Stream, val reflect.Value) error {
 	b, err := s.Bytes()
 	if err != nil {
@@ -615,7 +615,7 @@ func (s *Stream) Bytes() ([]byte, error) {
 ```
 
 #### Stream 结构分析
-解码器的其他代码和编码器的结构差不多， 但是有一个特殊的结构是编码器里面没有的。那就是`Stream`。 这个是用来读取用流式的方式来解码RLP的一个辅助类。 前面我们讲到了大致的解码流程就是首先通过`Kind()`方法获取需要解码的对象的类型和长度,然后根据长度和类型进行数据的解码。 那么我们如何处理结构体的字段又是结构体的数据呢， 回忆我们对结构体进行处理的时候，首先调用`s.List()`方法，然后对每个字段进行解码，最后调用`s.EndList()`方法。 技巧就在这两个方法里面， 下面我们看看这两个方法。
+解码器的其他代码和编码器的结构差不多， 但是有一个特殊的结构是编码器里面没有的。那就是`Stream`。 这个是用来读取用流式的方式来解码RLP的一个辅助类。 前面我们讲到了大致的解码流程就是首先通过`Kind()`方法获取需要解码的对象的类型和长度,然后根据长度和类型进行数据的解码。 那么我们如何处理结构体的字段又是结构体的数据呢， 回忆我们对结构体进行处理的时候，首先调用`s.List()`方法，然后对每个字段进行解码，最后调用`s.ListEnd()`方法。 技巧就在这两个方法里面， 下面我们看看这两个方法。
 ```go
 type Stream struct {
 	r ByteReader
@@ -631,9 +631,46 @@ type Stream struct {
 }
 ```
 
+~~Stream的`List()`方法，当调用List方法的时候。我们先调用Kind方法获取类型和长度，如果类型不匹配那么就抛出错误，然后我们把一个listpos对象压入到堆栈，这个对象是关键。 这个对象的pos字段记录了当前这个list已经读取了多少字节的数据， 所以刚开始的时候肯定是0. size字段记录了这个list对象一共需要读取多少字节数据。这样我在处理后续的每一个字段的时候，每读取一些字节，就会增加pos这个字段的值，处理到最后会对比pos字段和size字段是否相等，如果不相等，那么会抛出异常。~~
+```go
+// List函数开始解码一个RLP列表。如果输入不包含列表，则返回的错误将是ErrExpectedList。当到达列表的结尾时，任何Stream操作都将返回EOL。
+func (s *Stream) List() (size uint64, err error) {
+	kind, size, err := s.Kind()
+	if err != nil {
+		return 0, err
+	}
+	if kind != List {
+		return 0, ErrExpectedList
+	}
 
+	// 在将新大小推入堆栈之前，从外部列表中减去内部列表的大小。这样可以确保在匹配的ListEnd调用之后，剩余的外部列表大小将是正确的。
+	// listLimit函数返回最内层列表中剩余的数据量。
+	if inList, limit := s.listLimit(); inList {
+		s.stack[len(s.stack)-1] = limit - size
+	}
+	s.stack = append(s.stack, size)
+	s.kind = -1
+	s.size = 0
+	return size, nil
+}
+```
 
-
+~~`Stream的`ListEnd()`方法，如果当前读取的数据数量pos不等于声明的数据长度size，抛出异常，然后对堆栈进行pop操作，如果当前堆栈不为空，那么就在堆栈的栈顶的pos加上当前处理完毕的数据长度(用来处理这种情况--结构体的字段又是结构体， 这种递归的结构~~
+```go
+// ListEnd函数返回到封闭的列表中。输入阅读器必须位于列表的末尾。
+func (s *Stream) ListEnd() error {
+	// 确保当前列表中没有剩余的数据。
+	if inList, listLimit := s.listLimit(); !inList {
+		return errNotInList
+	} else if listLimit > 0 {
+		return errNotAtEOL
+	}
+	s.stack = s.stack[:len(s.stack)-1] // pop
+	s.kind = -1
+	s.size = 0
+	return nil
+}
+```
 
 
 
