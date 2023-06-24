@@ -560,9 +560,7 @@ func makeStructDecoder(typ reflect.Type) (decoder, error) {
 			err := f.info.decoder(s, val.Field(f.index))
 			if err == EOL {
 				if f.optional {
-					// The field is optional, so reaching the end of the list before
-					// reaching the last field is acceptable. All remaining undecoded
-					// fields are zeroed.
+					// 该字段是可选的，因此在到达最后一个字段之前到达列表结尾是可以接受的。所有剩余未解码的字段都将被清零。
 					zeroFields(val, fields[i:])
 					break
 				}
@@ -632,6 +630,8 @@ type Stream struct {
 ```
 
 ~~Stream的`List()`方法，当调用List方法的时候。我们先调用Kind方法获取类型和长度，如果类型不匹配那么就抛出错误，然后我们把一个listpos对象压入到堆栈，这个对象是关键。 这个对象的pos字段记录了当前这个list已经读取了多少字节的数据， 所以刚开始的时候肯定是0. size字段记录了这个list对象一共需要读取多少字节数据。这样我在处理后续的每一个字段的时候，每读取一些字节，就会增加pos这个字段的值，处理到最后会对比pos字段和size字段是否相等，如果不相等，那么会抛出异常。~~
+
+Stream的`List()`方法，当调用List方法的时候。我们先调用Kind方法获取输入流中下一个值的类型和长度，如果类型不匹配那么就抛出错误.然后调用`listLimit`获取最内层列表中剩余的数据量，从外部列表中减去内部列表的大小，并将更新到栈中顶部第一个元素(也就是数组最后一个)。然后将最内部列表的大小压入栈。
 ```go
 // List函数开始解码一个RLP列表。如果输入不包含列表，则返回的错误将是ErrExpectedList。当到达列表的结尾时，任何Stream操作都将返回EOL。
 func (s *Stream) List() (size uint64, err error) {
@@ -644,7 +644,6 @@ func (s *Stream) List() (size uint64, err error) {
 	}
 
 	// 在将新大小推入堆栈之前，从外部列表中减去内部列表的大小。这样可以确保在匹配的ListEnd调用之后，剩余的外部列表大小将是正确的。
-	// listLimit函数返回最内层列表中剩余的数据量。
 	if inList, limit := s.listLimit(); inList {
 		s.stack[len(s.stack)-1] = limit - size
 	}
@@ -653,9 +652,49 @@ func (s *Stream) List() (size uint64, err error) {
 	s.size = 0
 	return size, nil
 }
+
+// Kind函数返回输入流中下一个值的类型和大小。
+//
+// 返回的大小是组成该值的字节数。对于kind == Byte，大小为零，因为该值包含在类型标记中。
+//
+// 第一次调用Kind将从input reader中读取大小信息，并将其定位在实际值的字节开头。对Kind的后续调用（直到该值被解码）不会推进输入阅读器，并返回缓存的信息。
+func (s *Stream) Kind() (kind Kind, size uint64, err error) {
+    if s.kind >= 0 {
+        return s.kind, s.size, s.kinderr
+    }
+	
+    // 检查列表结尾。这需要在这里完成，因为readKind检查列表大小，并且会返回错误。
+    inList, listLimit := s.listLimit()
+    if inList && listLimit == 0 {
+        return 0, 0, EOL
+    }
+    // 读取实际大小标记。
+    s.kind, s.size, s.kinderr = s.readKind()
+    if s.kinderr == nil {
+        // 检查前面的值的数据大小是否符合输入限制。
+		// 这是在这里完成的，因为许多解码器需要分配与值大小匹配的输入缓冲区。
+		// 在这里检查可以保护这些解码器免受声明非常大的值大小的输入的影响。
+        if inList && s.size > listLimit {
+            s.kinderr = ErrElemTooLarge
+        } else if s.limited && s.size > s.remaining {
+            s.kinderr = ErrValueTooLarge
+        }
+    }
+    return s.kind, s.size, s.kinderr
+}
+
+// listLimit函数返回最内层列表中剩余的数据量。
+func (s *Stream) listLimit() (inList bool, limit uint64) {
+    if len(s.stack) == 0 {
+        return false, 0
+    }
+    return true, s.stack[len(s.stack)-1]
+}
 ```
 
 ~~`Stream的`ListEnd()`方法，如果当前读取的数据数量pos不等于声明的数据长度size，抛出异常，然后对堆栈进行pop操作，如果当前堆栈不为空，那么就在堆栈的栈顶的pos加上当前处理完毕的数据长度(用来处理这种情况--结构体的字段又是结构体， 这种递归的结构~~
+
+如果`len(s.stack) > 0` 或者 `listlimit > 0`，直接抛出异常，然后对堆栈进行pop操作
 ```go
 // ListEnd函数返回到封闭的列表中。输入阅读器必须位于列表的末尾。
 func (s *Stream) ListEnd() error {
