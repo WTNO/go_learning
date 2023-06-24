@@ -477,12 +477,159 @@ func writeString(val reflect.Value, w *encBuffer) error {
 ```
 
 ### **解码器 decode.go**
+解码器的大致流程和编码器差不多，理解了编码器的大致流程，也就知道了解码器的大致流程。
+```go
+// Decode函数对一个值进行解码，并将结果存储到val指向的值中。请参阅Decode函数的文档以了解解码规则。
+func (s *Stream) Decode(val interface{}) error {
+	if val == nil {
+		return errDecodeIntoNil
+	}
+	rval := reflect.ValueOf(val)
+	rtyp := rval.Type()
+	if rtyp.Kind() != reflect.Ptr {
+		return errNoPointer
+	}
+	if rval.IsNil() {
+		return errDecodeIntoNil
+	}
+	decoder, err := cachedDecoder(rtyp.Elem())
+	if err != nil {
+		return err
+	}
 
+	err = decoder(s, rval.Elem())
+	if decErr, ok := err.(*decodeError); ok && len(decErr.ctx) > 0 {
+		// Add decode target type to error so context has more meaning.
+		decErr.ctx = append(decErr.ctx, fmt.Sprint("(", rtyp.Elem(), ")"))
+	}
+	return err
+}
 
+func makeDecoder(typ reflect.Type, tags rlpstruct.Tags) (dec decoder, err error) {
+    kind := typ.Kind()
+    switch {
+    case typ == rawValueType:
+        return decodeRawValue, nil
+    case typ.AssignableTo(reflect.PtrTo(bigInt)):
+        return decodeBigInt, nil
+    case typ.AssignableTo(bigInt):
+        return decodeBigIntNoPtr, nil
+    case typ == reflect.PtrTo(u256Int):
+        return decodeU256, nil
+    case typ == u256Int:
+        return decodeU256NoPtr, nil
+    case kind == reflect.Ptr:
+        return makePtrDecoder(typ, tags)
+    case reflect.PtrTo(typ).Implements(decoderInterface):
+        return decodeDecoder, nil
+    case isUint(kind):
+        return decodeUint, nil
+    case kind == reflect.Bool:
+        return decodeBool, nil
+    case kind == reflect.String:
+        return decodeString, nil
+    case kind == reflect.Slice || kind == reflect.Array:
+        return makeListDecoder(typ, tags)
+    case kind == reflect.Struct:
+        return makeStructDecoder(typ)
+    case kind == reflect.Interface:
+        return decodeInterface, nil
+    default:
+        return nil, fmt.Errorf("rlp: type %v is not RLP-serializable", typ)
+    }
+}
+```
 
+我们同样通过结构体类型的解码过程来查看具体的解码过程。跟编码过程差不多，首先通过`structFields`获取需要解码的所有字段，然后每个字段进行解码。 跟编码过程差不多有一个`List()`和`ListEnd()`的操作，不过这里的处理流程和编码过程不一样，后续章节会详细介绍。
+```go
+func makeStructDecoder(typ reflect.Type) (decoder, error) {
+	fields, err := structFields(typ)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range fields {
+		if f.info.decoderErr != nil {
+			return nil, structFieldError{typ, f.index, f.info.decoderErr}
+		}
+	}
+	dec := func(s *Stream, val reflect.Value) (err error) {
+		if _, err := s.List(); err != nil {
+			return wrapStreamError(err, typ)
+		}
+		for i, f := range fields {
+			err := f.info.decoder(s, val.Field(f.index))
+			if err == EOL {
+				if f.optional {
+					// The field is optional, so reaching the end of the list before
+					// reaching the last field is acceptable. All remaining undecoded
+					// fields are zeroed.
+					zeroFields(val, fields[i:])
+					break
+				}
+				return &decodeError{msg: "too few elements", typ: typ}
+			} else if err != nil {
+				return addErrorContext(err, "."+typ.Field(f.index).Name)
+			}
+		}
+		return wrapStreamError(s.ListEnd(), typ)
+	}
+	return dec, nil
+}
+```
 
+下面在看<font color="pink">字符串的解码过程</font>，因为不同长度的字符串有不同方式的编码，我们可以通过前缀的不同来获取字符串的类型， 这里我们通过`s.Kind()`方法获取当前需要解析的类型和长度，如果是Byte类型，那么直接返回Byte的值， 如果是String类型那么读取指定长度的值然后返回。 这就是kind()方法的用途。
+```go
+// TODO:为什么调用decodeString的时候没有传递参数
+func decodeString(s *Stream, val reflect.Value) error {
+	b, err := s.Bytes()
+	if err != nil {
+		return wrapStreamError(err, val.Type())
+	}
+	val.SetString(string(b))
+	return nil
+}
 
+// Bytes函数读取一个RLP字符串并将其内容作为字节切片返回。如果输入不包含RLP字符串，则返回的错误将是ErrExpectedString。
+func (s *Stream) Bytes() ([]byte, error) {
+    kind, size, err := s.Kind()
+    if err != nil {
+        return nil, err
+    }
+    switch kind {
+    case Byte:
+        s.kind = -1 // rearm Kind
+        return []byte{s.byteval}, nil
+    case String:
+        b := make([]byte, size)
+        if err = s.readFull(b); err != nil {
+            return nil, err
+        }
+        if size == 1 && b[0] < 128 {
+            return nil, ErrCanonSize
+        }
+        return b, nil
+    default:
+        return nil, ErrExpectedString
+    }
+}
+```
 
+#### Stream 结构分析
+解码器的其他代码和编码器的结构差不多， 但是有一个特殊的结构是编码器里面没有的。那就是`Stream`。 这个是用来读取用流式的方式来解码RLP的一个辅助类。 前面我们讲到了大致的解码流程就是首先通过`Kind()`方法获取需要解码的对象的类型和长度,然后根据长度和类型进行数据的解码。 那么我们如何处理结构体的字段又是结构体的数据呢， 回忆我们对结构体进行处理的时候，首先调用`s.List()`方法，然后对每个字段进行解码，最后调用`s.EndList()`方法。 技巧就在这两个方法里面， 下面我们看看这两个方法。
+```go
+type Stream struct {
+	r ByteReader
+
+	remaining uint64   // 从r中剩余要读取的字节数
+	size      uint64   // 值的大小
+	kinderr   error    // 上次读取的错误
+	stack     []uint64 // 列表大小
+	uintbuf   [32]byte // 整数解码的辅助缓冲区
+	kind      Kind     // 下一个值的类型
+	byteval   byte     // 类型标记中单字节的值
+	limited   bool     // 输入限制是否生效的标志
+}
+```
 
 
 
