@@ -1,0 +1,395 @@
+p2p包实现了通用的p2p网络协议。包括节点的查找，节点状态的维护，节点连接的建立等p2p的功能。p2p 包实现的是通用的p2p协议。 某一种具体的协议(比如eth协议。 whisper协议。 swarm协议)被封装成特定的接口注入p2p包。所以p2p内部不包含具体协议的实现。 只完成了p2p网络应该做的事情。
+
+## nodedb.go
+在`p2p/server.go/Start()`中有这么一段代码：
+```go
+func (srv *Server) Start() (err error) {
+	...
+	if err := srv.setupLocalNode(); err != nil {
+        return err
+    }
+	...
+}
+```
+
+这段代码开始创建一个本地节点，继续深入
+```go
+func (srv *Server) setupLocalNode() error {
+	// 创建devp2p握手
+	// 根据分配给服务端的私钥恢复出公钥
+	pubkey := crypto.FromECDSAPub(&srv.PrivateKey.PublicKey)
+	// 握手结构体初始化
+	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name, ID: pubkey[1:]}
+	// 将server中支持的协议放入握手协议储存室中
+	for _, p := range srv.Protocols {
+		srv.ourHandshake.Caps = append(srv.ourHandshake.Caps, p.cap())
+	}
+	// 对协议进行排序
+	sort.Sort(capsByNameAndVersion(srv.ourHandshake.Caps))
+
+	// Create the local node.
+	// 创建本地数据存储目录
+	db, err := enode.OpenDB(srv.NodeDatabase)
+	if err != nil {
+		return err
+	}
+	srv.nodedb = db
+	// 给server.localnode填充相关属性
+	srv.localnode = enode.NewLocalNode(db, srv.PrivateKey)
+	srv.localnode.SetFallbackIP(net.IP{127, 0, 0, 1})
+	// TODO: check conflicts
+	for _, p := range srv.Protocols {
+		for _, e := range p.Attributes {
+			srv.localnode.Set(e)
+		}
+	}
+	switch srv.NAT.(type) {
+	case nil:
+		// No NAT interface, do nothing.
+	case nat.ExtIP:
+		// ExtIP doesn't block, set the IP right away.
+		ip, _ := srv.NAT.ExternalIP()
+		srv.localnode.SetStaticIP(ip)
+	default:
+		// Ask the router about the IP. This takes a while and blocks startup,
+		// do it in the background.
+		srv.loopWG.Add(1)
+		go func() {
+			defer srv.loopWG.Done()
+			if ip, err := srv.NAT.ExternalIP(); err == nil {
+				srv.localnode.SetStaticIP(ip)
+			}
+		}()
+	}
+	return nil
+}
+```
+> Devp2p握手是以太坊协议中的一部分，用于建立网络节点之间的连接。它涉及互相交换并验证节点的协议版本、网络ID、节点ID和公钥等信息。握手过程旨在确保节点之间的安全和有效通信。
+
+打开上面代码中的`enode.OpenDB(srv.NodeDatabase)`函数，正式进入`nodedb.go`中
+
+顾名思义，这个文件内部主要实现了节点的持久化，因为p2p网络节点的节点发现和维护都是比较花时间的，为了反复启动的时候，能够把之前的工作继承下来，避免每次都重新发现。 所以持久化的工作是必须的。
+
+之前我们分析了ethdb的代码和trie的代码，trie的持久化工作使用了leveldb。 这里同样也使用了leveldb。 不过p2p的leveldb实例和主要的区块链的leveldb实例不是同一个。
+
+newNodeDB,根据参数path来看打开基于内存的数据库，还是基于文件的数据库。
+```go
+// OpenDB函数用于打开一个节点数据库，用于存储和检索有关网络中已知节点的信息。
+// 如果没有提供路径，则会构建一个基于内存的临时数据库。
+func OpenDB(path string) (*DB, error) {
+	if path == "" {
+		return newMemoryDB()
+	}
+	return newPersistentDB(path)
+}
+
+// newMemoryNodeDB函数创建一个新的基于内存的节点数据库，没有持久化的后端存储。
+func newMemoryDB() (*DB, error) {
+    db, err := leveldb.Open(storage.NewMemStorage(), nil)
+    if err != nil {
+        return nil, err
+    }
+    return &DB{lvl: db, quit: make(chan struct{})}, nil
+}
+
+// newPersistentNodeDB函数 创建/打开一个基于LevelDB的持久化节点数据库，
+// 并在版本不匹配的情况下刷新其内容。
+func newPersistentDB(path string) (*DB, error) {
+    opts := &opt.Options{OpenFilesCacheCapacity: 5}
+    db, err := leveldb.OpenFile(path, opts)
+    if _, iscorrupted := err.(*errors.ErrCorrupted); iscorrupted {
+        db, err = leveldb.RecoverFile(path, nil)
+    }
+    if err != nil {
+        return nil, err
+    }
+    // 如果缓存中的节点与特定的协议版本不匹配，那么刷新所有节点。
+    currentVer := make([]byte, binary.MaxVarintLen64)
+    currentVer = currentVer[:binary.PutVarint(currentVer, int64(dbVersion))]
+    
+    blob, err := db.Get([]byte(dbVersionKey), nil)
+    switch err {
+    case leveldb.ErrNotFound:
+        // 版本未找到（即缓存为空），请插入它。
+        if err := db.Put([]byte(dbVersionKey), currentVer, nil); err != nil {
+            db.Close()
+            return nil, err
+        }
+        
+    case nil:
+        // 如果版本已存在，则如果版本不同，则进行刷新。
+        if !bytes.Equal(blob, currentVer) {
+            db.Close()
+            if err = os.RemoveAll(path); err != nil {
+                return nil, err
+            }
+            return newPersistentDB(path)
+        }
+    }
+    return &DB{lvl: db, quit: make(chan struct{})}, nil
+}
+```
+
+Node的查询、存储和删除
+```go
+// Node函数从数据库中检索具有给定id的节点。
+func (db *DB) Node(id ID) *Node {
+	blob, err := db.lvl.Get(nodeKey(id), nil)
+	if err != nil {
+		return nil
+	}
+	return mustDecodeNode(id[:], blob)
+}
+
+func mustDecodeNode(id, data []byte) *Node {
+    node := new(Node)
+    if err := rlp.DecodeBytes(data, &node.r); err != nil {
+        panic(fmt.Errorf("p2p/enode: can't decode node %x in DB: %v", id, err))
+    }
+    // Restore node id cache.
+    copy(node.id[:], id)
+    return node
+}
+
+// UpdateNode函数将一个节点插入（可能覆盖）到对等节点数据库中。
+func (db *DB) UpdateNode(node *Node) error {
+    if node.Seq() < db.NodeSeq(node.ID()) {
+        return nil
+    }
+    blob, err := rlp.EncodeToBytes(&node.r)
+    if err != nil {
+        return err
+    }
+    if err := db.lvl.Put(nodeKey(node.ID()), blob, nil); err != nil {
+        return err
+    }
+    return db.storeUint64(nodeItemKey(node.ID(), zeroIP, dbNodeSeq), node.Seq())
+}
+
+// DeleteNode函数会删除与一个节点相关的所有信息。
+func (db *DB) DeleteNode(id ID) {
+    deleteRange(db.lvl, nodeKey(id))
+}
+
+func deleteRange(db *leveldb.DB, prefix []byte) {
+    it := db.NewIterator(util.BytesPrefix(prefix), nil)
+    defer it.Release()
+    for it.Next() {
+        db.Delete(it.Key(), nil)
+    }
+}
+```
+
+Node的结构（v4wire.go）
+```go
+// Node represents information about a node.
+type Node struct {
+    IP  net.IP // len 4 for IPv4 or 16 for IPv6
+    UDP uint16 // for discovery protocol
+    TCP uint16 // for RLPx protocol
+    ID  Pubkey
+}
+```
+
+节点超时处理
+```go
+// ensureExpirer是一个小的辅助方法，确保数据过期机制正在运行。
+// 如果过期的goroutine已经在运行，该方法只是返回。
+//
+// 目标是在网络成功引导自身之后才开始数据撤离（以防止倾倒可能有用的种子节点）。
+// 由于精确追踪第一次成功收敛将需要很大的开销，所以在出现适当条件时（即成功绑定），
+// "确保"正确状态并丢弃进一步的事件更简单。
+func (db *DB) ensureExpirer() {
+    db.runner.Do(func() { go db.expirer() })
+}
+
+// expirer应该在一个goroutine中启动，并负责无限循环并从数据库中删除过期的数据。
+func (db *DB) expirer() {
+    tick := time.NewTicker(dbCleanupCycle)
+    defer tick.Stop()
+    for {
+        select {
+        case <-tick.C:
+            db.expireNodes()
+        case <-db.quit:
+            return
+        }
+    }
+}
+
+// expireNodes遍历数据库并删除一段时间内未被看到（即未收到pong消息）的所有节点。
+func (db *DB) expireNodes() {
+    it := db.lvl.NewIterator(util.BytesPrefix([]byte(dbNodePrefix)), nil)
+    defer it.Release()
+    if !it.Next() {
+        return
+    }
+    
+    var (
+        threshold    = time.Now().Add(-dbNodeExpiration).Unix()
+        youngestPong int64
+        atEnd        = false
+    )
+    for !atEnd {
+        id, ip, field := splitNodeItemKey(it.Key())
+        if field == dbNodePong {
+            time, _ := binary.Varint(it.Value())
+            if time > youngestPong {
+                youngestPong = time
+            }
+            if time < threshold {
+                // 如果某个IP地址的最后一次pong消息比阈值更早，那么删除属于该IP地址的字段。
+                deleteRange(db.lvl, nodeItemKey(id, ip, ""))
+            }
+        }
+        atEnd = !it.Next()
+        nextID, _ := splitNodeKey(it.Key())
+        if atEnd || nextID != id {
+            // 我们已经超过当前ID的最后一个条目。
+			// 如果没有最近的足够时间的pong消息，就删除所有内容。
+            if youngestPong > 0 && youngestPong < threshold {
+                deleteRange(db.lvl, nodeKey(id))
+            }
+            youngestPong = 0
+        }
+    }
+}
+```
+
+一些状态更新函数
+```go
+// 检索从远程节点接收到的最后一个ping数据包的时间。
+func (db *DB) LastPingReceived(id ID, ip net.IP) time.Time {
+	if ip = ip.To16(); ip == nil {
+		return time.Time{}
+	}
+	return time.Unix(db.fetchInt64(nodeItemKey(id, ip, dbNodePing)), 0)
+}
+
+// 更新我们尝试联系远程节点的最后时间。
+func (db *DB) UpdateLastPingReceived(id ID, ip net.IP, instance time.Time) error {
+	if ip = ip.To16(); ip == nil {
+		return errInvalidIP
+	}
+	return db.storeInt64(nodeItemKey(id, ip, dbNodePing), instance.Unix())
+}
+
+// 检索从远程节点接收到的最后一个成功pong的时间。
+func (db *DB) LastPongReceived(id ID, ip net.IP) time.Time {
+	if ip = ip.To16(); ip == nil {
+		return time.Time{}
+	}
+	// Launch expirer
+	db.ensureExpirer()
+	return time.Unix(db.fetchInt64(nodeItemKey(id, ip, dbNodePong)), 0)
+}
+
+// 更新节点的最后一个pong时间。
+func (db *DB) UpdateLastPongReceived(id ID, ip net.IP, instance time.Time) error {
+	if ip = ip.To16(); ip == nil {
+		return errInvalidIP
+	}
+	return db.storeInt64(nodeItemKey(id, ip, dbNodePong), instance.Unix())
+}
+
+// 检索自绑定以来的findnode失败次数。
+func (db *DB) FindFails(id ID, ip net.IP) int {
+	if ip = ip.To16(); ip == nil {
+		return 0
+	}
+	return int(db.fetchInt64(nodeItemKey(id, ip, dbNodeFindFails)))
+}
+
+// 更新自绑定以来的findnode失败次数。
+func (db *DB) UpdateFindFails(id ID, ip net.IP, fails int) error {
+	if ip = ip.To16(); ip == nil {
+		return errInvalidIP
+	}
+	return db.storeInt64(nodeItemKey(id, ip, dbNodeFindFails), int64(fails))
+}
+```
+
+从数据库里面随机挑选合适种子节点
+```go
+// QuerySeeds函数检索用作引导的潜在种子节点的随机节点。
+func (db *DB) QuerySeeds(n int, maxAge time.Duration) []*Node {
+	var (
+		now   = time.Now()
+		nodes = make([]*Node, 0, n)
+		it    = db.lvl.NewIterator(nil, nil)
+		id    ID
+	)
+	defer it.Release()
+
+seek:
+	for seeks := 0; len(nodes) < n && seeks < n*5; seeks++ {
+		// 随机定位到一个条目。每次都随机增加第一个字节的值，
+		// 以增加在非常小的数据库中命中所有现有节点的可能性。
+		ctr := id[0]
+		rand.Read(id[:])
+		id[0] = ctr + id[0]%16
+		it.Seek(nodeKey(id))
+
+		n := nextNode(it)
+		if n == nil {
+			id[0] = 0
+			continue seek // iterator exhausted
+		}
+		if now.Sub(db.LastPongReceived(n.ID(), n.IP())) > maxAge {
+			continue seek
+		}
+		for i := range nodes {
+			if nodes[i].ID() == n.ID() {
+				continue seek // duplicate
+			}
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes
+}
+
+// 从迭代器中读取下一个节点记录，跳过其他数据库条目。
+func nextNode(it iterator.Iterator) *Node {
+	for end := false; !end; end = !it.Next() {
+		id, rest := splitNodeKey(it.Key())
+		if string(rest) != dbDiscoverRoot {
+			continue
+		}
+		return mustDecodeNode(id[:], it.Value())
+	}
+	return nil
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
