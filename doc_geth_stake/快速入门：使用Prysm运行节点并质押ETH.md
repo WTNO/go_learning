@@ -47,7 +47,7 @@ Prysm是以太坊权益证明共识规范的一个实现。在这个快速入门
 
 进入您的执行目录，并运行以下命令启动执行节点：
 
-    geth --goerli --http --http.api eth,net,engine,admin 
+    geth --goerli --http --http.api eth,net,engine,admin --datadir d:\EthereumData
 
 请参阅Geth的命令行选项以获取参数定义。
 
