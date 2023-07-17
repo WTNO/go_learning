@@ -62,7 +62,12 @@ Prysm是以太坊权益证明共识规范的一个实现。在这个快速入门
 
 > --http-web3provider已被弃用，并已被--execution-endpoint取代，但是在Windows上，IPC目前仅通过--http-web3provider工作。这个问题将在我们的下一个版本中修复。在此期间，您可以安全地忽略任何与“deprecated flag”相关的警告。
 
-    prysm.bat beacon-chain --http-web3provider=//./pipe/<your.ipc> --prater --genesis-state=genesis.ssz --suggested-fee-recipient=0x01234567722E6b0000012BFEBf6177F1D2e9758D9
+```shell
+prysm.bat beacon-chain --http-web3provider=//./pipe/<your.ipc> --prater --genesis-state=genesis.ssz --suggested-fee-recipient=0x01234567722E6b0000012BFEBf6177F1D2e9758D9
+
+prysm.bat beacon-chain --execution-endpoint=//./pipe/geth.ipc --prater --genesis-state=genesis.ssz --suggested-fee-recipient=0x01234567722E6b0000012BFEBf6177F1D2e9758D9
+```
+
 
 如果您正在运行一个验证器，指定一个建议的手续费接收地址将允许您获得以前的矿工交易手续费小费。有关此功能的更多信息，请参阅如何配置手续费接收方。
 
