@@ -565,9 +565,35 @@ Prysm共识客户端由两个二进制文件组成，分别提供信标节点和
 
 首先，前往此处并确定最新版本。它位于页面顶部。例如：
 
+<img src="./img/以太坊质押指南25.webp">
 
+<img src="./img/以太坊质押指南26.webp">
 
+在资产部分（如有需要，请展开）复制beacon-chain-v...-linux-amd64文件和validator-v...-linux-amd64文件的下载链接。请确保复制正确的链接。
 
+使用以下命令下载二进制文件。修改URL以匹配复制的下载链接。
+```shell
+$ cd ~
+$ curl -LO https://github.com/prysmaticlabs/prysm/releases/download/v4.0.1/beacon-chain-v4.0.1-linux-amd64
+$ curl -LO https://github.com/prysmaticlabs/prysm/releases/download/v4.0.1/validator-v4.0.1-linux-amd64
+```
+
+重命名文件并使其可执行。将它们复制到/usr/local/bin目录中。Prysm服务将从那里运行它们。修改文件名以匹配已下载的版本。
+```shell
+$ mv beacon-chain-v4.0.1-linux-amd64 beacon-chain
+$ mv validator-v4.0.1-linux-amd64 validator
+$ chmod +x beacon-chain
+$ chmod +x validator
+$ sudo cp beacon-chain /usr/local/bin
+$ sudo cp validator /usr/local/bin
+```
+
+清理文件。
+```shell
+$ rm beacon-chain && rm validator
+```
+
+> 注意：更新Prysm需要遵循特定的一系列步骤。请参阅附录E - 更新Prysm以获取更多信息。
 
 
 
