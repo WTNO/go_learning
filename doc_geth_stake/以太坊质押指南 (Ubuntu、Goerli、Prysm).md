@@ -286,19 +286,284 @@ $ sudo ufw status numbered
 
 注销并再次通过SSH登录，以确认一切是否正常运行。
 
+## 步骤5 — 创建交换空间
+交换空间（在系统内存不足时用于存储内存数据的磁盘文件）用于防止内存不足错误。对于需要在同步或运行时使用大量内存的客户端特别有用。在这里可以找到更多信息。
 
+确认没有配置任何交换空间。
+```shell
+$ free -h
+```
 
+在交换空间行中的0表示没有分配交换空间。
 
+<img src="./img/以太坊质押指南9.webp">
 
+> 注意：如果您已经分配了交换空间，可以跳过此步骤。
 
+下面显示了磁盘上推荐的交换空间大小。如果您有8GB的RAM，则使用3GB的交换空间大小。
+```shell
+RAM     交换空间大小
+8GB           3GB
+12GB           3GB
+16GB           4GB
+24GB           5GB
+32GB           6GB
+64GB           8GB
+128GB          11GB
+```
 
+检查可用的磁盘空间。
+```shell
+$ df -h
+```
 
+在`Mounted on`列中，找到包含“/”的行。交换文件将在该磁盘上创建。确保它具有足够的可用空间。
 
+<img src="./img/以太坊质押指南10.webp">
 
+创建交换空间。下面的值3G（3GB）适用于具有8GB RAM的服务器。根据您所需的大小更改该值。例如，如果您的服务器有16GB RAM，则使用4G。
+```shell
+$ sudo fallocate -l 3G /swapfile
+$ sudo chmod 600 /swapfile
+$ sudo mkswap /swapfile
+$ sudo swapon /swapfile
+```
 
+验证更改。
+```shell
+$ free -h
+```
 
+现在应该显示交换空间。
 
+<img src="./img/以太坊质押指南11.webp">
 
+使交换空间在重启后保持启用。
+```shell
+$ sudo cp /etc/fstab /etc/fstab.bak
+$ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+配置交换空间。
+```shell
+$ sudo sysctl vm.swappiness=10
+$ sudo sysctl vm.vfs_cache_pressure=50
+```
+
+打开配置文件以配置交换空间。
+```shell
+$ sudo nano /etc/sysctl.conf
+```
+
+在文件末尾添加以下内容。
+```shell
+vm.swappiness=10
+vm.vfs_cache_pressure = 50
+```
+
+请参考下方的屏幕截图。
+
+<img src="./img/以太坊质押指南12.webp">
+
+按下<CTRL> + X，然后按Y，然后按<ENTER>保存并退出。
+
+现在已配置交换文件。可以使用htop命令进行监视。
+
+<img src="./img/以太坊质押指南13.webp">
+
+## 步骤6 — 配置时间同步
+在区块链上运行验证器需要准确的时间同步，以确保与区块链网络的正确同步。Ubuntu内置了时间同步功能，并通过timedatectl systemd指令默认启用。
+
+验证它是否正常运行。
+```shell
+$ timedatectl
+```
+
+请参考下方的截图。
+<img src="./img/以太坊质押指南14.webp">
+
+NTP服务应该是处于活动状态的。如果不是，请运行以下命令：
+```shell
+$ sudo timedatectl set-ntp on
+```
+
+## 第七步 — 生成客户端身份验证密钥
+在服务器上，执行客户端和共识客户端之间的通信使用JSON Web Token（JWT）身份验证方案进行安全保护。JWT由一个包含随机生成的32字节十六进制字符串的文件表示。执行客户端和共识客户端各自使用该文件进行消息身份验证。更多信息请参见此处。
+
+在服务器上创建一个目录以存储JWT文件。
+```shell
+$ sudo mkdir -p /var/lib/jwtsecret
+```
+
+使用openssl密码学软件库生成JWT文件。
+```shell
+$ openssl rand -hex 32 | sudo tee /var/lib/jwtsecret/jwt.hex > /dev/null
+```
+
+使用以下命令检查带有十六进制字符串的文件。
+```shell
+$ sudo nano /var/lib/jwtsecret/jwt.hex
+```
+
+<img src="./img/以太坊质押指南15.webp">
+
+按下<CTRL>+X退出。
+
+在指南的后面部分，jwt.hex文件的路径将被包含在执行客户端和共识客户端的配置中，以便它们可以对传入和传出的消息进行身份验证。
+
+## 步骤8 — 配置执行客户端
+在质押过程中需要一个执行客户端。本指南包含了安装四个主要执行客户端的说明。它们是：
+
+<img src="./img/以太坊质押指南16.webp">
+
+每个客户端具有不同的特点。更多信息请参见此处。
+
+> 注意：只需要安装和运行上述四个选项中的一个执行客户端。
+
+您选择的客户端由您决定，但出于客户端多样性的考虑（以及避免使用大多数客户端时遇到广泛影响的错误而导致严重处罚），建议选择少数派客户端。请在此处查看当前分布情况。例如，在下面的截图中，Geth是主要的执行客户端，因此您应该考虑其他选项。
+
+<img src="./img/以太坊质押指南17.webp">
+
+> 注意：虽然本指南针对Goerli测试网络，但客户端多样性仍然很重要，可以帮助进行测试。这也将使您能够在转向主网之前练习运行少数派客户端。
+> 
+> 注意：执行客户端需要大量的磁盘空间来存储以太坊区块链数据。请参阅[此处](https://ethereum.org/en/developers/docs/nodes-and-clients/#recommended-specifications)的建议规格。
+
+以下说明详细介绍了安装每个执行客户端的步骤。请记住：只需要安装一个。根据需要跳过其他部分。
+
+### 安装执行客户端 —— Besu
+略
+
+### 安装执行客户端 —— Erigon
+略
+
+<img src="./img/以太坊质押指南20.webp">
+
+### 安装执行客户端 —— Geth
+通过下载最新版本来安装Geth执行客户端。
+
+请前往[此处](https://geth.ethereum.org/downloads/)获取最新发布的Geth版本。
+
+<img src="./img/以太坊质押指南21.webp">
+
+请右键点击Geth for Linux按钮，并复制下载链接到tar.gz文件。确保复制正确的链接。
+
+使用以下命令下载存档。修改URL以匹配最新版本的下载链接。
+```shell
+$ cd ~
+$ curl -LO https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.10.23-d901d853.tar.gz
+```
+
+从存档中提取文件并复制到/usr/local/bin目录中。geth服务将从那里运行它。修改文件名以匹配已下载的版本。
+```shell
+$ tar xvf geth-linux-amd64-1.10.23-d901d853.tar.gz
+$ cd geth-linux-amd64-1.10.23-d901d853
+$ sudo cp geth /usr/local/bin
+```
+
+清理文件。修改文件名以匹配已下载的版本。
+```shell
+$ cd ~
+$ rm geth-linux-amd64-1.10.23-d901d853.tar.gz
+$ rm -r geth-linux-amd64-1.10.23-d901d853
+```
+
+将配置为后台服务运行的Geth。为服务创建一个账户以运行。这种类型的账户无法登录服务器。
+```shell
+$ sudo useradd --no-create-home --shell /bin/false geth
+```
+
+创建数据目录。这是存储以太坊区块链数据所必需的。
+```shell
+$ sudo mkdir -p /var/lib/geth
+```
+
+设置目录权限。geth用户账户需要有修改数据目录的权限。
+```shell
+$ sudo chown -R geth:geth /var/lib/geth
+```
+
+创建一个systemd服务配置文件来配置服务。
+```shell
+$ sudo nano /etc/systemd/system/geth.service
+```
+
+将以下服务配置粘贴到文件中。
+```shell
+[Unit]
+Description=Geth Execution Client (Goerli Test Network)
+After=network.target
+Wants=network.target
+[Service]
+User=geth
+Group=geth
+Type=simple
+Restart=always
+RestartSec=5
+TimeoutStopSec=600
+ExecStart=/usr/local/bin/geth \
+  --goerli \
+  --datadir /var/lib/geth \
+  --authrpc.jwtsecret /var/lib/jwtsecret/jwt.hex \
+  --metrics \
+  --metrics.addr 127.0.0.1
+[Install]
+WantedBy=default.target
+```
+
+> 注意：添加TimeoutStopSec=600是为了让Geth服务有足够的时间在关闭时将缓存数据写入磁盘。更多信息请参考此处。
+
+值得注意的标志：
+- `--authrpc.jwtsecret /var/lib/jwtsecret/jwt.hex` JWT文件的路径，用于执行和共识客户端之间的身份验证通信。启用引擎API的RPC端点。设置此项将暴露一个经过身份验证的HTTP端点（http://127.0.0.1:8551）。
+- `--metrics.addr 127.0.0.1` 启用度量指标的HTTP服务器。
+
+请参考下方的截图。
+
+<img src="./img/以太坊质押指南22.webp">
+
+按下<CTRL> + X，然后按Y，最后按<ENTER>键保存并退出。
+
+重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
+```shell
+$ sudo systemctl daemon-reload
+$ sudo systemctl start geth
+$ sudo systemctl status geth
+```
+
+请参考下方的截图。它应该以绿色文字显示为active (running)。如果不是，请返回并重复步骤以解决问题。
+
+<img src="./img/以太坊质押指南23.webp">
+
+按下Q键退出（不会影响geth服务）。
+
+同步将立即开始。使用日志输出来跟踪进度或通过运行以下命令检查错误。
+```shell
+$ sudo journalctl -fu geth
+```
+
+请参考下方的截图。
+
+<img src="./img/以太坊质押指南24.webp">
+
+按下<CTRL>+ C键退出（不会影响geth服务）。
+
+启用geth服务以在重新启动时自动启动。
+```shell
+$ sudo systemctl enable geth
+```
+
+要检查同步状态，请监视日志输出。同步完成的示例输出可以在附录I - 同步完成的客户端输出中看到。
+
+> 注意：更新Geth客户端软件需要按照特定的步骤进行。有关更多信息，请参阅附录C - 更新Geth。
+> 
+> 注意：可以对Geth数据库进行修剪，以减小其在磁盘上的大小。有关更多信息，请参阅这里的Geth修剪指南。
+
+### 安装执行客户端 —— Nethermind
+略
+
+## 第9步 - 安装Prysm共识客户端
+Prysm共识客户端由两个二进制文件组成，分别提供信标节点和验证器的功能。这一步将下载并准备Prysm二进制文件。
+
+首先，前往此处并确定最新版本。它位于页面顶部。例如：
 
 
 
