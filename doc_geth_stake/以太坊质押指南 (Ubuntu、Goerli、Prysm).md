@@ -136,3 +136,177 @@ deposit.exe new-mnemonic --num_validators 2 --chain goerli --eth1_withdrawal_add
 
 首先完成并验证您的质押设置非常重要。如果Goerli测试网络ETH存款变得有效，并且您的质押设置尚未准备好，将会从您质押的Goerli测试网络ETH余额中扣除不活跃惩罚。
 
+## 步骤2 - 连接到服务器
+使用SSH客户端连接到您的Ubuntu服务器。如果您已经以root用户登录，请创建一个具有管理员权限的用户级账户，因为以root用户登录是有风险的。
+
+> 注意：如果您没有以root用户登录，则跳过此步骤，进入步骤3。
+
+创建一个新用户。将 `<yourusername>` 替换为您选择的用户名。您将被要求创建一个强密码并提供其他一些可选信息。
+
+```shell
+adduser <yourusername>
+```
+
+通过将新用户添加到sudo组中，授予新用户管理员权限。这将允许用户在命令前键入sudo以使用超级用户权限执行操作。
+```shell
+usermod -aG sudo <yourusername>
+```
+
+可选：如果您使用SSH密钥通过root用户连接到Ubuntu实例，则需要将新用户与root用户的SSH密钥数据关联起来。
+```shell
+rsync --archive --chown=<yourusername>:<yourusername> ~/.ssh /home/<yourusername>
+
+```
+
+最后，退出root用户并以<yourusername>用户登录。
+
+## 步骤3 - 更新服务器
+确保您的系统使用最新的软件和安全更新。
+```shell
+$ sudo apt -y update && sudo apt -y upgrade
+$ sudo apt dist-upgrade && sudo apt autoremove
+$ sudo reboot
+```
+
+## 步骤4 — 保护服务器
+安全是重要的。这不是一份全面的安全指南，只是一些基本的设置。
+
+### 修改默认的SSH端口
+端口22是默认的SSH端口，也是一种常见的攻击向量。为了避免这种情况，可以更改SSH端口。
+
+选择一个1024–49151之间的端口号，并运行以下命令来检查该端口是否已被使用。
+```shell
+$ sudo ss -tulpn | grep ':YourSSHPortNumber'
+```
+
+示例：
+```shell
+$ sudo ss -tulpn | grep ':6673'
+```
+如果返回空白，则表示该端口未被使用；如果返回红色文本，则表示该端口已被使用：请尝试使用其他端口号。
+
+如果确认端口可用，请通过更新服务器的SSH配置文件来修改默认的SSH端口号。打开配置文件：
+```shell
+$ sudo nano /etc/ssh/sshd_config
+```
+
+在文件中找到或添加（如果不存在）以下行：Port 22。如果有“#”符号，请将其删除，并按照下面的示例更改数值。
+```shell
+Port YourSSHPortNumber
+```
+
+请参考下面的截图。
+
+<img src="./img/以太坊质押指南7.webp">
+
+按下<CTRL> + X，然后按下Y，然后按下<ENTER>以保存并退出。
+
+重新启动SSH服务以反映更改。
+```shell
+$ sudo systemctl restart ssh
+```
+
+记得更新您的SSH客户端设置以反映您配置的新SSH端口。注销并使用`YourSSHPortNumber`作为端口号通过SSH重新登录，以确保一切正常运行。
+
+### 配置防火墙
+Ubuntu 20.04服务器可以使用UFW防火墙来限制对服务器的入站流量。防火墙有助于防止不必要的连接到您的服务器。
+
+#### 安装UFW
+UFW应该已默认安装。以下命令将确保其已安装。
+```shell
+$ sudo apt install ufw
+```
+
+#### 应用UFW默认设置
+明确应用默认设置：拒绝入站流量，允许出站流量。
+```shell
+$ sudo ufw default deny incoming
+$ sudo ufw default allow outgoing
+```
+
+#### 允许SSH
+允许在上面设置的YourSSHPortNumber上的入站流量。SSH需要使用TCP协议。
+
+> 注意：如果您正在本地托管Ubuntu实例并希望远程访问服务器（出于安全原因不建议），您的互联网路由器可能需要配置以允许端口YourSSHPortNumber上的传入流量。
+
+```shell
+$ sudo ufw allow YourSSHPortNumber/tcp
+```
+
+示例：
+```shell
+$ sudo ufw allow 6673/tcp
+```
+
+#### 拒绝SSH端口22
+如果您已更改SSH端口的值，则拒绝默认端口22/TCP的入站流量。
+```shell
+$ sudo ufw deny 22/tcp
+```
+
+#### 允许执行客户端端口30303
+允许与执行客户端节点（端口30303）建立P2P连接。这是本指南中所有执行客户端常用的端口。
+
+> 注意：如果您正在本地托管Ubuntu实例，则您的互联网路由器可能还需要配置以允许端口30303上的传入流量。
+
+```shell
+$ sudo ufw allow 30303
+```
+
+#### 允许Prysm
+允许与共识客户端节点进行P2P连接，以执行Beacon Chain节点上的操作（端口13000/TCP和12000/UDP）。
+
+> 注意：如果您在本地托管Ubuntu实例，则您的互联网路由器可能需要配置以允许端口13000/TCP和12000/UDP的传入流量。
+
+```shell
+$ sudo ufw allow 13000/tcp
+$ sudo ufw allow 12000/udp
+```
+
+#### 允许Grafana
+允许对Grafana Web服务器的请求进行传入访问（端口3000/TCP）。
+
+> 注意：如果您在本地托管Ubuntu实例并希望远程访问Grafana仪表板（出于安全原因不建议），您的互联网路由器可能还需要配置以允许端口3000的传入流量。
+
+```shell
+$ sudo ufw allow 3000/tcp
+```
+
+### 启用防火墙
+启用防火墙并验证规则是否已正确配置。
+
+```shell
+$ sudo ufw enable
+$ sudo ufw status numbered
+```
+
+请参考下方的屏幕截图。
+
+<img src="./img/以太坊质押指南8.webp">
+
+注销并再次通过SSH登录，以确认一切是否正常运行。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
