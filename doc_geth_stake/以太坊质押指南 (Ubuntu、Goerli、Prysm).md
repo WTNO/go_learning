@@ -601,3 +601,30 @@ $ rm beacon-chain && rm validator
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
