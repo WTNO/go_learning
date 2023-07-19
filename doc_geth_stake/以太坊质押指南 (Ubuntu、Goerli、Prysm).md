@@ -595,23 +595,140 @@ $ rm beacon-chain && rm validator
 
 > 注意：更新Prysm需要遵循特定的一系列步骤。请参阅附录E - 更新Prysm以获取更多信息。
 
+## 第10步 - 导入验证者密钥
+通过导入在第1步生成的验证者密钥来配置Prysm验证者。
 
+### 将验证者密钥库文件复制到服务器
+如果您在Ubuntu服务器之外的机器上生成了验证者密钥库文件（keystore-[..].json），您需要将文件复制到您的主目录下。您可以使用USB驱动器（如果服务器是本地的）或通过安全FTP（SFTP）来完成此操作。
 
+将文件放置在此位置：$HOME/staking-deposit-cli/validator_keys。如果需要，首先使用以下命令创建目录。
+```shell
+$ sudo mkdir -p $HOME/staking-deposit-cli/validator_keys
+```
 
+如果您使用SFTP复制文件时遇到权限被拒绝的错误，请使用以下命令将登录帐户授权访问该目录。将<yourusername>替换为登录帐户的用户名。
+```shell
+$ sudo chown -R <yourusername>:<yourusername> $HOME/staking-deposit-cli/validator_keys
+```
 
+参考下面的屏幕截图。
 
+<img src="./img/以太坊质押指南27.webp">
 
+### 将验证器密钥库文件导入Prysm
+创建一个目录来存储验证器数据，并给当前用户访问权限。当前用户需要访问权限，因为他们将执行导入操作。将<yourusername>更改为已登录的用户名。
+```shell
+$ sudo mkdir -p /var/lib/prysm/validator
+$ sudo chown -R <yourusername>:<yourusername> /var/lib/prysm/validator
+```
 
+运行验证器导入过程。您需要提供生成的`keystore-[..].json`文件所在的目录。例如：`$HOME/staking-deposit-cli/validator_keys`。
 
+```shell
+$ /usr/local/bin/validator accounts import --keys-dir=$HOME/staking-deposit-cli/validator_keys --wallet-dir=/var/lib/prysm/validator --goerli
+```
 
+您将看到使用条款，您需要接受这些条款才能继续。
 
+您需要创建一个钱包密码。这与您在第1步中设置的验证器密码不同。Prysm将使用此密码解密验证器钱包。请将其备份到安全的地方。您以后在本节和配置验证器时都需要使用它。
 
+<img src="./img/以太坊质押指南28.webp">
 
+您需要提供验证器密钥密码。这是您在第1步创建密钥时设置的密码。
 
+<img src="./img/以太坊质押指南29.webp">
 
+如果您正确输入密码，密钥将被导入。
 
+<img src="./img/以太坊质押指南30.webp">
 
+> 注意：如果您为每个验证器使用了不同的密码，则会出现错误。多次运行该过程，分别提供不同的密码，直到它们全部导入。使用“/usr/local/bin/validator accounts list --wallet-dir=/var/lib/prysm/validator --goerli”命令进行验证。
 
+### 创建钱包密码文件
+创建一个文件来存储钱包密码，以便Prysm验证器服务可以在不需要您提供密码的情况下访问钱包。
+```shell
+$ sudo nano /var/lib/prysm/validator/password.txt
+```
+
+将您的新钱包密码添加到文件中。将`YourNewWalletPassword`替换为您的密码。
+
+请参考下面的屏幕截图。
+
+<img src="./img/以太坊质押指南31.webp">
+
+按下<CTRL> + X，然后按Y，最后按<ENTER>以保存并退出。
+
+导入完成，钱包已设置完毕。
+
+> ***注意：需要按照一系列特定的步骤来添加额外的验证者。有关详细信息，请参阅附录F-添加验证者。***
+
+## 第11步-配置Beacon节点服务
+在这一步中，您将配置并运行Prysm Beacon节点作为服务，以便在系统重新启动时，该进程将自动重新启动。
+
+### 设置帐户
+为服务创建一个帐户。这种类型的帐户无法登录服务器。
+```shell
+$ sudo useradd --no-create-home --shell /bin/false prysmbeacon
+```
+
+### 设置目录和权限
+创建Prysm Beacon节点数据库的数据目录并设置权限。
+```shell
+$ sudo mkdir -p /var/lib/prysm/beacon
+$ sudo chown -R prysmbeacon:prysmbeacon /var/lib/prysm/beacon
+```
+
+### 创建并配置服务
+创建一个systemd服务配置文件来配置服务。
+```shell
+$ sudo nano /etc/systemd/system/prysmbeacon.service
+```
+
+将以下内容粘贴到文件中。
+```shell
+[Unit]
+Description=Prysm Consensus Client BN (Goerli Test Network)
+Wants=network-online.target
+After=network-online.target
+[Service]
+User=prysmbeacon
+Group=prysmbeacon
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/beacon-chain \
+  --goerli \
+  --datadir=/var/lib/prysm/beacon \
+  --execution-endpoint=http://127.0.0.1:8551 \
+  --jwt-secret=/var/lib/jwtsecret/jwt.hex \
+  --suggested-fee-recipient=FeeRecipientAddress \
+  --enable-debug-rpc-endpoints \
+  --grpc-max-msg-size=65568081 \
+  --checkpoint-sync-url=CheckpointSyncURL \
+  --genesis-beacon-api-url=CheckpointSyncURL \
+  --accept-terms-of-use
+[Install]
+WantedBy=multi-user.target
+```
+
+> ***注意：确保将上面的FeeRecipientAddress设置为您控制的有效以太坊地址，以便接收验证者费用。例如：`--suggested-fee-recipient=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045***
+> 
+> ***注意：确保将上述的两个CheckpointSyncURL设置为有效的检查点同步URL。有关更多信息，请参阅下文。例如：`--checkpoint-sync-url=https://goerli.beaconstate.ethstaker.cc` 和 `--genesis-beacon-api-url=https://goerli.beaconstate.ethstaker.cc`***
+
+重要的标志：
+
+`--execution-endpoint=http://127.0.0.1:8551` 执行客户端的地址。在本指南中，所有执行客户端应该是相同的。
+
+`--jwt-secret=/var/lib/jwtsecret/jwt.hex` JWT文件的路径，用于执行客户端和共识客户端之间的身份验证通信。
+
+`--suggested-fee-recipient=FeeRecipientAddress` 验证者可以从用户交易中获得小费。提供您控制的以太坊地址，以指定小费的去向。
+
+`--enable-debug-rpc-endpoints`
+`--grpc-max-msg-size=6568081`
+`--checkpoint-sync-url`
+`--genesis-beacon-api-url` 启用检查点同步功能，大大加快Beacon Chain节点的同步速度。在此处提供一个已同步的Beacon Chain节点的URL以进行同步。您可以在此处获取一个。确保选择一个Goerli的端点。
+
+请参考下面的屏幕截图。
 
 
 
