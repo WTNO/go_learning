@@ -884,45 +884,159 @@ $ sudo systemctl enable prysmvalidator
 
 向下滚动，勾选框，然后点击继续。
 
+<img src="./img/以太坊质押指南39.webp">
+
+您将被要求上传`deposit_data-[timestamp].json`文件。您在第1步中生成了此文件。您可能需要将文件复制到您正在运行Launchpad的计算机上。复制文件不会带来安全问题。浏览或拖动文件进行上传，然后点击继续。
+
+<img src="./img/以太坊质押指南40.webp">
+
+连接您的钱包。选择MetaMask，登录并从下拉菜单中选择Goerli测试网络。选择包含您的Goerli测试网络ETH的账户，然后点击继续。
+
+<img src="./img/以太坊质押指南41.webp">
+
+> ***警告：请确保您在MetaMask中绝对百分之百地选择了Goerli测试网络。请勿将以太坊主网ETH发送到任何测试网络。***
+
+您的MetaMask账户余额将显示出来。如果您已经选择了Goerli测试网络并且您有足够的Goerli测试网络ETH余额，该网站将允许您继续进行。
+
+<img src="./img/以太坊质押指南42.webp">
+
+总结显示了所需的验证者数量和总共需要的Goerli测试网络ETH金额。如果您同意，请勾选框并点击继续。
+
+<img src="./img/以太坊质押指南43.webp">
+
+点击`发起所有交易`
+
+<img src="./img/以太坊质押指南44.webp">
+
+这将会弹出多个MetaMask实例，每个实例都包含一个32个Goerli测试网络ETH交易请求，用于向Prater（也是Goerli测试网络）的存款合约进行存款。请确认每个交易。
+
+<img src="./img/以太坊质押指南45.webp">
+
+一旦所有交易成功完成，您就完成了！
+
+<img src="./img/以太坊质押指南46.webp">
+
+恭喜！
+
+<img src="./img/以太坊质押指南47.webp">
+
+就是这样。我们有一个可用的执行和共识客户端，并且已完成质押存款。一旦您的存款生效，您将自动开始质押并获得奖励。恭喜您，您太棒了！
+
+> ***注意：一旦您完成在测试网络中的参与，退出验证者被认为是一个良好的做法。请参考附录G-退出验证者。***
+
+## 步骤14-检查您的验证者状态
+新添加的验证者可能需要一段时间（几小时、几天或几周）才能激活。您可以按照以下步骤检查您的验证者状态：
+
+<img src="./img/以太坊质押指南48.webp">
+
+1. 复制您的MetaMask钱包地址（与您用于存款的相同地址）。
+2. 访问此网址：https://goerli.beaconcha.in/
+3. 使用您的钱包地址搜索您的密钥（们）。
+
+在深入研究特定的验证者时，我们可以看到一个状态部分，该部分提供了每个验证者激活的估计时间。
+
+<img src="./img/以太坊质押指南49.webp">
+
+## 步骤15 - 监控：安装Prometheus
+Prometheus监控工具包将用于公开执行和共识客户端的运行时数据。
+
+请访问[此处](https://prometheus.io/download/)获取最新版本的Prometheus。
+
+<img src="./img/以太坊质押指南50.webp">
+
+复制下载链接到 **linux-amd64.tar.gz** 文件。确保复制正确的链接。
+
+使用下面的命令下载存档文件。根据以下说明中的URL修改为最新版本的下载链接。
+```shell
+$ cd ~
+$ curl -LO https://github.com/prometheus/prometheus/releases/download/v2.37.0/prometheus-2.37.0.linux-amd64.tar.gz
+```
 
 
+从存档中提取文件并将两个二进制文件复制到`/usr/local/bin`目录。Prometheus服务将从那里运行它们。修改文件名以匹配下载的版本。
+```shell
+$ tar xvf prometheus-2.37.0.linux-amd64.tar.gz
+$ sudo cp prometheus-2.37.0.linux-amd64/prometheus /usr/local/bin/
+$ sudo cp prometheus-2.37.0.linux-amd64/promtool /usr/local/bin/
+```
 
+将内容文件复制到以下位置。修改文件名以匹配下载的版本。
+```shell
+$ sudo cp -r prometheus-2.37.0.linux-amd64/consoles /etc/prometheus
+$ sudo cp -r prometheus-2.37.0.linux-amd64/console_libraries /etc/prometheus
+```
 
+清理文件。修改文件名以匹配下载的版本。
+```shell
+$ rm prometheus-2.37.0.linux-amd64.tar.gz
+$ rm -r prometheus-2.37.0.linux-amd64
+```
 
+将配置为后台服务运行的Prometheus。为服务创建一个账户以运行。这种类型的账户无法登录服务器。
+```shell
+$ sudo useradd --no-create-home --shell /bin/false prometheus
+```
 
+创建数据目录。这是存储以太坊区块链数据所必需的。
+```shell
+$ sudo mkdir -p /var/lib/prometheus
+```
 
+创建配置文件。Prometheus使用一个配置文件来确定从哪里获取数据。我们将在这里设置它。
 
+创建一个可编辑的配置文件。
+```shell
+$ sudo nano /etc/prometheus/prometheus.yml
+```
 
+将以下内容粘贴到文件中。下面的配置包括每个执行客户端的设置。不需要修改这些设置，但如果你愿意，可以删除冗余的行。结构和对齐非常重要，必须完全复制。
 
+> ***注意：如果您使用Erigon或Geth作为执行客户端，您可能需要从配置中删除另一个客户端的条目，以避免重叠的数据源。***
 
+```shell
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+  - job_name: node_exporter
+    static_configs:
+      - targets:
+          - localhost:9100
+  - job_name: prysm-beacon
+    static_configs:
+      - targets:
+          - localhost:8080
+  - job_name: prysm-validator
+    static_configs:
+      - targets:
+          - localhost:8081
+  - job_name: besu
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - localhost:9545
+  - job_name: erigon
+    metrics_path: /debug/metrics/prometheus
+    static_configs:
+      - targets:
+          - localhost:6060
+  - job_name: geth
+    metrics_path: /debug/metrics/prometheus
+    static_configs:
+      - targets:
+          - localhost:6060
+  - job_name: nethermind
+    static_configs:
+      - targets:
+          - localhost:9091
+```
 
+请参考下方的屏幕截图。
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+<img src="./img/以太坊质押指南51.webp">
 
 
 
