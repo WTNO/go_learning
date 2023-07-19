@@ -730,6 +730,214 @@ WantedBy=multi-user.target
 
 请参考下面的屏幕截图。
 
+<img src="./img/以太坊质押指南32.webp">
+
+按下<CTRL> + X然后Y然后<ENTER>以保存并退出。
+
+重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
+```shell
+$ sudo systemctl daemon-reload
+$ sudo systemctl start prysmbeacon
+$ sudo systemctl status prysmbeacon
+```
+
+参考下面的截图。它应该显示绿色文字中的active (running)。如果不是，请返回并重复步骤以解决问题。
+
+<img src="./img/以太坊质押指南33.webp">
+
+按Q退出（不会影响prysmbeacon服务）。
+
+同步将立即开始。
+
+> ***注意：为了能够质押，执行客户端和共识客户端必须完全同步。***
+
+使用日志输出来跟踪进度或通过运行以下命令检查错误。
+```shell
+$ sudo journalctl -fu prysmbeacon
+```
+
+请参考下面的截图。
+
+<img src="./img/以太坊质押指南34.webp">
+
+> ***注意：如果Prysm客户端没有与完全同步的执行客户端连接，将不会尝试执行验证器职责。***
+
+启用服务以在重新启动时自动启动。
+```shell
+$ sudo systemctl enable prysmbeacon
+```
+
+要检查同步状态，请监视日志输出。同步输出的示例可以在附录I - 同步客户端输出中看到。
+
+## 第12步 - 配置验证器服务
+在此步骤中，您将配置并运行Prysm验证器作为一个服务，以便如果系统重新启动，该进程将自动重新启动。
+
+### 设置验证器节点账户和目录
+为验证器节点创建一个账户以运行。这种类型的账户无法登录服务器。
+```shell
+$ sudo useradd --no-create-home --shell /bin/false prysmvalidator
+```
+
+在第10步中，验证器导入过程创建了以下目录：/var/lib/prysm/validator。设置目录权限，以便prysmvalidator账户可以修改该目录。
+```shell
+$ sudo chown -R prysmvalidator:prysmvalidator /var/lib/prysm/validator
+```
+
+### 创建和配置服务
+创建一个systemd服务文件来存储服务配置。
+```shell
+$ sudo nano /etc/systemd/system/prysmvalidator.service
+```
+
+将以下内容粘贴到文件中。
+```shell
+[Unit]
+Description=Prysm Consensus Client VC (Goerli Test Network)
+Wants=network-online.target
+After=network-online.target
+[Service]
+User=prysmvalidator
+Group=prysmvalidator
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/validator \
+  --datadir=/var/lib/prysm/validator \
+  --wallet-dir=/var/lib/prysm/validator \
+  --wallet-password-file=/var/lib/prysm/validator/password.txt \
+  --graffiti="<yourgraffiti>" \
+  --accept-terms-of-use
+[Install]
+WantedBy=multi-user.target
+```
+
+值得注意的标志：
+`--graffiti "<yourgraffiti>"` 用您自己的标语字符串替换。出于安全和隐私原因，请避免包含可以唯一标识您的信息。例如，`--graffiti="Validatooor"`。
+
+请参考下面的截图。
+
+<img src="./img/以太坊质押指南35.webp">
+
+按下<CTRL> + X，然后按Y，然后按<ENTER>保存并退出。
+
+重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
+```shell
+$ sudo systemctl daemon-reload
+$ sudo systemctl start prysmvalidator
+$ sudo systemctl status prysmvalidator
+```
+
+请参考下面的截图。它应该以绿色文本显示为活动（正在运行）。如果没有，请返回并重复步骤以解决问题。
+
+<img src="./img/以太坊质押指南36.webp">
+
+按下Q键退出（不会影响prysmvalidator服务）。
+
+同步将立即开始。
+
+> ***注意：为了能够参与质押，执行客户端和共识客户端必须完全同步。***
+
+使用日志输出跟踪进度或通过运行以下命令检查错误。
+```shell
+$ sudo journalctl -fu prysmvalidator
+```
+
+请参考下面的截图。
+
+<img src="./img/以太坊质押指南37.webp">
+
+启用服务以在重新启动时自动启动。
+```shell
+$ sudo systemctl enable prysmvalidator
+```
+
+要检查同步状态，请监视日志输出。已同步输出的示例可以在附录I - 同步客户端输出中看到。
+
+您现在应该已经安装、配置和运行了Prysm共识客户端。做得很好！接下来，我们将执行存款操作，以激活您在网络上的验证者。
+
+## 第13步 - 为验证者提供资金
+现在共识客户端已经运行起来了，为了在Goerli测试网络上开始质押，您需要存入Goerli测试网络ETH来为您的验证者提供资金。
+
+### 获取Goerli测试网络ETH
+每个验证者需要存入32个Goerli测试网络ETH。您需要足够的金额来为每个验证者提供资金。例如，如果您计划运行2个验证者，您将需要（2 x 32）= 64个Goerli测试网络ETH，再加上一些额外的费用来支付燃气费。
+
+从这里开始，有两种选择：
+
+#### 方法1 - 您提供Goerli ETH
+如果您有足够的Goerli ETH来为您的验证者提供资金，请继续执行下面的“执行存款”部分，并按照说明进行操作。
+
+#### 方法2 - #cheap-goerli-validator频道
+此方法将利用一个机器人代表您完成存款，每个用户/钱包限制为2个验证者，费用为0.0001个Goerli ETH。请前往[EthStaker Discord](https://discord.io/ethstaker)，并按照[#cheap-goerli-validator](https://discord.com/channels/694822223575384095/1026679645808119868)频道中提供的说明使用机器人完成存款。
+
+> ***注意：为了防止滥用，新的discord成员使用机器人需要等待2-3天。***
+
+### 完成存款
+此步骤涉及将所需金额的Goerli ETH存入Prater（也是Goerli）质押合约。这是通过以太坊质押Launchpad网站在Web浏览器上完成的。
+
+> ***注意：在进行存款之前，请等待您的执行客户端和共识客户端完全同步。如果它们没有完全同步，而您的验证者在网络上变为活动状态，您将会受到不活动惩罚。***
+
+请访问以下网址：https://goerli.launchpad.ethereum.org/
+
+点击 **Become a Validator(成为验证着)** ，按照警告步骤继续点击，直到您到达 **Generate Key Pairs(生成密钥对)** 部分。选择您将要运行的验证者数量。选择与您在 **第1步** 创建的验证者数量匹配的值。
+
+<img src="./img/以太坊质押指南38.webp">
+
+向下滚动，勾选框，然后点击继续。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
