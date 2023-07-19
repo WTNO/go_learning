@@ -1282,16 +1282,304 @@ $ sudo systemctl enable grafana-server
 
 <img src="./img/以太坊质押指南63.webp">
 
+## 第18步 - 监控：添加Grafana仪表板
+需要一个Grafana仪表板来可视化监控数据。
+
+在Grafana网站（http://<yourserverip>:3000）的左侧菜单栏中，点击"Dashboards"，然后选择"Import"。
 
 <img src="./img/以太坊质押指南64.webp">
 
+导入屏幕接受仪表板ID或原始JSON。
+
+<img src="./img/以太坊质押指南65.webp">
+
+### 执行客户端仪表板
+以下代码引用了每个执行客户端的仪表板。选择与您的设置相匹配的一个。
+- Besu：10273
+- Geth：14053或15750
+- Erigon：[复制此处的数据](https://raw.githubusercontent.com/ledgerwatch/erigon/devel/cmd/prometheus/dashboards/erigon.json)
+- Nethermind：[复制此处的数据](https://raw.githubusercontent.com/NethermindEth/metrics-infrastructure/master/grafana/dashboards/nethermind.json)。
+
+在导入屏幕上，将ID输入到第一个框中（Besu或Geth），或者将链接中的JSON文本粘贴到所需客户端的框中（Erigon或Nethermind）。您可能还需要选择数据源（Prometheus）。
+
+### 共识客户端仪表板
+在导入屏幕上，将此处的JSON文本粘贴到框中。将其重命名为Prysm。
+
+<img src="./img/以太坊质押指南66.webp">
+
+您应该能够查看仪表板。起初，您可能没有足够的数据，但在一切开始运行后，数据将填充。
+
+<img src="./img/以太坊质押指南67.webp">
+
+## 最后的话和建议的下一步
+感谢您的机会。希望这个指南对您有所帮助。
+
+### 下一步：
+- 重新启动您的机器，并确保所有服务都重新启动
+- 了解如何更新客户端和服务器软件
+- 使用htop / df -h / ncdu等工具来监控本地机器的资源
+- 查看附录J-管理Systemd日志以管理日志大小
+- 熟悉beaconcha.in，以便监控您的验证者
+- 使用beaconcha.in移动应用程序监控您的验证者
+- 加入Ethstaker和Prysm Discord以获取重要通知
+- 通过Discord (Somer#0753)、Twitter或Reddit分享反馈意见
+- 在Ethstaker Discord上帮助他人设置
+- 与您的朋友分享这个指南！
+- 感谢赞赏：
+  - somer.eth (0x32B74B90407309F6637245292cd90347DE658A37)
+  - Gitcoin Grants
+
+### 进一步阅读
+强烈建议您从尽可能多的来源评估信息。以下是一些额外的资源，可以帮助您熟悉以太坊的质押。
+
+作者未经核实这些资源。请自行承担使用风险。
+- [以太坊基金会](https://ethereum.org/en/learn/)
+- 执行客户端文档：Besu / Erigon / Geth / Nethermind
+- 共识客户端文档：Lighthouse / Lodestar / Prysm / Nimbus / Teku
+- [CoinCashew指南](https://www.coincashew.com/)
+- [Metanull-Operator指南](https://github.com/metanull-operator/eth2-ubuntu)
+- [Remy Roy EthStaker指南](https://github.com/remyroy/ethstaker)
+- [ETH Docker文档](https://eth-docker.net/docs/About/Overview/)
+
+## 附录C-更新Geth
+如果您需要更新到最新版本的Geth，请按照以下步骤操作。
+
+注意：如果您使用此指南的早期版本使用PPA（个人软件包档案）安装了Geth，请跳到本附录末尾的步骤。
+
+首先，打开这个链接，在Geth for Linux按钮上右键点击并复制tar.gz文件的下载链接。确保复制正确的链接。
+
+修改下面的指令中的URL，使其与最新版本的下载链接匹配。
+```shell
+$ cd ~
+$ curl -LO https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.10.23-d901d853.tar.gz
+```
+
+停止Geth服务。
+```shell
+$ sudo systemctl stop geth
+```
+
+从存档中提取文件并复制到/usr/local/bin目录下。修改文件名以匹配已下载的版本。
+```shell
+$ tar xvf geth-linux-amd64-1.10.23-d901d853.tar.gz
+$ cd geth-linux-amd64-1.10.23-d901d853
+$ sudo cp geth /usr/local/bin
+```
+
+重新启动服务并检查是否有错误。
+```shell
+$ sudo systemctl start geth
+$ sudo systemctl status geth # <-- 检查错误
+$ sudo journalctl -fu geth # <-- 监控
+$ sudo journalctl -fu prysmbeacon # <-- 监控
+```
+
+清理文件。修改文件名以匹配已下载的版本。
+```shell
+$ cd ~
+$ rm geth-linux-amd64-1.10.23-d901d853.tar.gz
+$ rm -r geth-linux-amd64-1.10.23-d901d853
+```
+
+可选：如果您正在运行通过此指南的早期版本使用PPA（个人软件包档案）配置的Geth，则请按照以下步骤操作。
+```shell
+$ sudo systemctl stop geth
+$ sudo apt update && sudo apt upgrade
+$ sudo systemctl start geth
+$ sudo systemctl status geth # <-- 检查错误
+$ sudo journalctl -fu geth # <-- 监控
+$ sudo journalctl -fu prysmbeacon # <-- 监控
+```
+
+## 附录 E — 更新 Prysm
+如果您需要更新到最新版本的 Prysm，请按照以下步骤操作。
+
+首先，点击[这里](https://github.com/prysmaticlabs/prysm/releases)并找到最新版本。在`assets`部分（如有需要请展开），复制 `beacon-chain-v…-linux-amd64` 文件和 `validator-v…-linux-amd64` 文件的下载链接。请确保复制正确的链接。
+
+根据以下指示修改 URL，使其与最新版本的下载链接匹配。
+```shell
+$ cd ~
+$ curl -LO https://github.com/prysmaticlabs/prysm/releases/download/v4.0.1/beacon-chain-v4.0.1-linux-amd64
+$ curl -LO https://github.com/prysmaticlabs/prysm/releases/download/v4.0.1/validator-v4.0.1-linux-amd64
+```
+
+停止 Prysm 客户端服务。
+```shell
+$ sudo systemctl stop prysmvalidator
+$ sudo systemctl stop prysmbeacon
+```
+
+重命名文件并使其可执行。将它们复制到 /usr/local/bin 目录。将文件名修改为下载版本的名称。
+```shell
+$ mv beacon-chain-v4.0.1-linux-amd64 beacon-chain
+$ mv validator-v4.0.1-linux-amd64 validator
+$ chmod +x beacon-chain
+$ chmod +x validator
+$ sudo cp beacon-chain /usr/local/bin
+$ sudo cp validator /usr/local/bin
+```
+
+重新启动服务并检查是否有错误。
+```shell
+$ sudo systemctl start prysmbeacon
+$ sudo systemctl status prysmbeacon # <-- 检查是否有错误
+$ sudo journalctl -fu prysmbeacon # <-- 监控
+$ sudo systemctl start prysmvalidator
+$ sudo systemctl status prysmvalidator # <-- 检查是否有错误
+$ sudo journalctl -fu prysmvalidator # <-- 监控
+```
+
+清理提取的文件。
+```shell
+$ rm beacon-chain && rm validator
+```
+
+## 附录 F — 添加验证者
+如果您想要向 Prysm 添加一个或多个验证者，请按照以下步骤进行操作。
+
+> ***注意：本附录假设您已经按照指南完成了所有步骤。请勿使用本节向空的验证者钱包/不完整的设置添加验证者。***
+
+### 生成存款数据
+您需要为新的验证者生成存款数据。这将用于将新的验证者添加到您现有的钱包中。
+
+前往此处获取存款命令行界面（CLI）应用程序的“最新版本”。
+
+将二进制文件传输到 USB 存储设备并复制到空气隔离的计算机以确保安全（建议），或者如果无法使用该设备，则复制到未连接到网络/互联网的计算机（不建议）。
+
+在安全的计算机上，在终端窗口（或 Windows 中的 CMD）中运行二进制文件，并继续使用以下命令。
+
+使用 existing-mnemonic 命令从您的现有助记词重新生成或派生新的验证者密钥。为此，您需要提供助记词短语，因此需要满足安全要求。
+
+在 Linux 上：
+```shell
+$ ./deposit existing-mnemonic --validator_start_index <ValidatorStartIndex> --num_validators <NumberOfValidators> --chain goerli --eth1_withdrawal_address <YourWithdrawalAaddress>
+```
+
+在 Windows 上：
+```shell
+deposit.exe existing-mnemonic --validator_start_index <ValidatorStartIndex> --num_validators <NumberOfValidators> --chain goerli --eth1_withdrawal_address <YourWithdrawalAaddress>
+```
+
+将 `<ValidatorStartIndex>` 替换为您要添加的新验证者的起始索引。例如：如果您有 2 个现有的验证者（#0，#1）并且想要添加一个新的验证者，您将指定 2（作为序列中的下一个数字）作为起始索引。例如：`--validator_start_index 2`。
+
+> ***注意：仔细检查起始索引。确保使用正确的值。***
+
+将 `<NumberOfValidators>` 替换为您要资助的验证者数量。每个验证者需要 32 个 Goerli 测试网络 ETH 存款进行资助。
+
+将 `<YourWithdrawalAddress>` 替换为您控制的 Goerli 测试网络以太坊地址。
+
+> ***注意：如果您需要 Goerli 测试网络 ETH 来资助您的验证者，您必须将提款地址设置为 0x4D496CcC28058B1D74B7a19541663E21154f9c84。这是 EthStaker Goerli Bot 的官方地址。它每个钱包地址只允许进行 2 次存款，因此您只能创建 2 个验证者（64 Goerli ETH）。如果您已经有足够的 Goerli ETH，您可以忽略此步骤。重要的是，此指令仅适用于测试网设置。对于主网，请使用您控制的地址。有关更多信息，请参阅 EthStaker Discord 上的 `#cheap-goerli-validator` 频道。***
+> 
+> ***注意：一旦设置，提款地址将无法更改，因此请务必确保它是您控制的地址并正确指定。例如：  
+> `--eth1_withdrawal_address 0x4D496CcC28058B1D74B7a19541663E21154f9c84`***
+> 
+> ***注意：标志 `--eth1_withdrawal_address` 允许您指定一个 Goerli 测试网络以太坊地址，用于自动提取超过 32 个抵押的 Goerli 测试网络 ETH 的权益（一旦启用提款）。如果您退出验证者，这也将是您 32 个抵押的 Goerli 测试网络 ETH 提取到的地址。有关更多信息，请参阅[此处](https://notes.ethereum.org/@launchpad/withdrawals-faq)。***
+> 
+> ***注意：如果您此时不设置 `--eth1_withdrawal_address` 标志，您可以在准备好开始提取权益或退出验证者时通过特殊过程（将提款凭证从 0x00 转换为 0x01）进行设置。如果不设置该标志，权益将不会自动提取，并且在您转换提款凭证之前，您将无法在退出验证者时回收 32 个抵押的 Goerli 测试网络 ETH。***
+
+根据上述示例，我们正在添加一个新的验证者：`--num_validators 1`，起始索引为 2，`--validator_start_index 2`。
 
 
+<img src="./img/以太坊质押指南68.webp">
 
+请输入您在创建初始验证器后应该安全保存的助记词。
 
+<img src="./img/以太坊质押指南69.webp">
 
+您将被要求输入您的验证器密钥库密码。此密码在第一步中设置。您可以在此处创建不同的密码，但为了简单起见，建议使用与原始密钥库相同的密码。确认密钥库密码后，您的验证器密钥将被创建。
 
+<img src="./img/以太坊质押指南70.webp">
 
+验证器密钥和存款数据文件已在指定位置创建。以下是目录的内容。
 
+<img src="./img/以太坊质押指南71.webp">
 
+关于文件的说明：
 
+- 较新的`deposit_data-[timestamp].json`文件包含了新添加的验证器的公钥和质押存款的信息。此文件将在本指南后面用于完成Goerli测试网络ETH质押存款过程。
+- 新创建的`keystore-[..].json`文件包含了加密的验证器签名密钥。每个您要资助的额外验证器都有一个keystore文件。这些文件将导入到共识客户端验证器钱包中，在验证操作中使用。
+- 稍后在此步骤中，您将把这些文件复制到您的Ubuntu服务器上（如果尚未存在）。
+- 如果您丢失或意外删除了这些文件，可以使用质押存款工具和您的助记词通过`existing-mnemonic`命令重新生成它们。更多信息请参阅[此处](https://github.com/ethereum/staking-deposit-cli)。
+
+**此刻请勿存入任何Goerli测试网络ETH。**
+
+首先完成和验证您的质押设置非常重要。如果Goerli测试网络ETH存款变为活动状态，而您的质押设置尚未准备好，将从您的Goerli测试网络ETH余额中扣除不活动惩罚。
+
+### 将验证器Keystore文件复制到服务器
+如果您在Ubuntu服务器之外的计算机上生成了验证器的`keystore-[..].json`文件，则需要将文件复制到您的主目录中。您可以使用USB驱动器（如果服务器在本地）或通过安全FTP（SFTP）进行复制。
+
+将文件放置在此处：`$HOME/staking-deposit-cli/validator_keys`。如有必要，请创建这些目录。
+
+为了添加新的验证器密钥，我们将停止Prysm验证器服务。
+```shell
+$ sudo systemctl stop prysmvalidator
+```
+
+设置目录权限。您登录的帐户需要有权查看和修改数据目录。将<yourusername>替换为当前登录的用户名。
+```shell
+$ sudo chown -R <yourusername>:<yourusername> /var/lib/prysm/validator
+```
+
+运行验证器导入过程。您需要提供生成的`keystore-[..].json`文件所在的目录。例如`$HOME/staking-deposit-cli/validator_keys`。
+
+> ***注意：如果在validator_keys目录中存在先前已导入的keystore-[..].json文件，导入过程中会要求您输入密码。***
+
+```shell
+$ /usr/local/bin/validator accounts import --keys-dir=$HOME/staking-deposit-cli/validator_keys --wallet-dir=/var/lib/prysm/validator --goerli
+```
+
+您需要提供钱包密码。这是您在第10步中创建的用于保护钱包的密码。
+
+然后，您需要提供要导入的验证器帐户的keystore密码。这应该是您在上面生成新的验证器密钥时指定的相同密码。
+
+请参考下面的屏幕截图。
+
+<img src="./img/以太坊质押指南72.webp">
+
+> ***注意：如果您为每个验证器使用了不同的密码，您将会收到错误提示。请多次运行该过程，每次提供不同的密码，直到它们全部导入成功。***
+
+使用以下命令验证验证器账户。您将被要求输入钱包密码。
+```shell
+$ /usr/local/bin/validator accounts list --wallet-dir=/var/lib/prysm/validator --goerli
+```
+
+请参考下面的屏幕截图。
+
+<img src="./img/以太坊质押指南73.webp">
+
+恢复prysmvalidator帐户访问该目录的权限。
+```shell
+$ sudo chown -R prysmvalidator:prysmvalidator /var/lib/prysm/validator
+```
+
+导入完成后，重新启动验证器并检查是否有错误。
+```shell
+$ sudo systemctl start prysmvalidator
+$ sudo systemctl status prysmvalidator # <-- 检查是否有错误
+$ sudo journalctl -fu prysmvalidator # <-- 监控
+```
+
+如果您一切操作正确，您应该会看到以下输出，确认新添加的验证器。
+```shell
+msg="Validating for public key" prefix=validator publicKey=0x87aef47324f0
+msg="Validating for public key" prefix=validator publicKey=0x87432f581d95
+msg="Validating for public key" prefix=validator publicKey=0x8a0e3be52467
+```
+
+现在，验证器已导入并准备好执行任务，您需要转到上面的第13步 - 资助验证器密钥，并通过Launchpad为新验证器提供资金。您需要上传先前在本节中创建的新的deposit_data-[timestamp].json文件。
+
+> ***注意：在完成第13步并且验证器通过激活队列之前，新的验证器将无法完全正常运行。***
+
+## 附录 G — 退出验证器
+如果您不再运行验证器，退出验证器是一个良好的做法。这有助于保持测试网络的参与率。一旦您退出验证器，它们将无法再使用相同的密钥进行验证。
+
+请使用以下命令。您需要输入您的钱包密码。
+```shell
+$ sudo /usr/local/bin/validator accounts voluntary-exit --wallet-dir=/var/lib/prysm/validator
+```
+
+使用箭头键选择您要退出的账户，并按照提示继续操作。
+
+<img src="./img/以太坊质押指南74.webp">
+
+> ***注意：验证器退出可能需要一些时间。您可以通过在 https://goerli.beaconcha.in/ 上搜索验证器密钥来检查退出的状态。如果链没有最终确定，退出将无法成功。一旦退出成功，您可以停止您的服务，如果需要的话。***
