@@ -1038,24 +1038,252 @@ scrape_configs:
 
 <img src="./img/以太坊质押指南51.webp">
 
+按下<CTRL> + X，然后按Y，再按<ENTER>保存并退出。
+
+设置目录权限。Prometheus用户账户需要权限来修改这些目录。
+```shell
+$ sudo chown -R prometheus:prometheus /etc/prometheus
+$ sudo chown -R prometheus:prometheus /var/lib/prometheus
+```
+
+创建一个systemd服务配置文件来配置该服务。
+```shell
+$ sudo nano /etc/systemd/system/prometheus.service
+```
+
+将以下服务配置粘贴到文件中。
+```shell
+[Unit]
+Description=Prometheus
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/prometheus \
+--config.file=/etc/prometheus/prometheus.yml \
+--storage.tsdb.path=/var/lib/prometheus \
+--web.console.templates=/etc/prometheus/consoles \
+--web.console.libraries=/etc/prometheus/console_libraries
+[Install]
+WantedBy=multi-user.target
+```
+
+参考下方的截图。
+
+<img src="./img/以太坊质押指南52.webp">
+
+按下<CTRL> + X，然后按Y，再按<ENTER>保存并退出。
+
+重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
+```shell
+$ sudo systemctl daemon-reload
+$ sudo systemctl start prometheus
+$ sudo systemctl status prometheus
+```
+
+参考下方的截图。它应该显示绿色文本中的active (running)。如果不是，则返回并重复步骤以解决问题。
+
+<img src="./img/以太坊质押指南53.webp">
+
+按Q退出（不会影响Prometheus服务）。
+
+使用journal输出通过运行以下命令检查错误。
+```shell
+$ sudo journalctl -fu prometheus
+```
+
+参考下方的截图。
+
+<img src="./img/以太坊质押指南54.webp">
+
+按下<CTRL>+C退出（不会影响Prometheus服务）。
+
+启用Prometheus服务以在重新启动时自动启动。
+```shell
+$ sudo systemctl enable prometheus
+```
+
+服务现在已安装。
+
+## 步骤16 — 监控：安装Node Exporter
+Node Exporter服务公开了您的Ubuntu服务器的操作系统指标。
+
+请访问此处获取Node Exporter的最新发布版本（不是预发布版本）。
+
+<img src="./img/以太坊质押指南55.webp">
+
+将下载链接复制到`linux-amd64.tar.gz`文件中。请确保复制正确的链接。
+
+使用以下命令下载存档。根据以下说明中的URL修改为与最新版本的下载链接相匹配。
+```shell
+$ cd ~
+$ curl -LO https://github.com/prometheus/node_exporter/releases/download/v1.3.1/node_exporter-1.3.1.linux-amd64.tar.gz
+```
+
+从存档中提取文件并将二进制文件复制到/usr/local/bin目录。Node Exporter服务将从那里运行它们。根据下载的版本修改文件名。
+```shell
+$ tar xvf node_exporter-1.3.1.linux-amd64.tar.gz
+$ sudo cp node_exporter-1.3.1.linux-amd64/node_exporter /usr/local/bin
+```
+
+清理文件。根据下载的版本修改文件名。
+```shell
+$ rm node_exporter-1.3.1.linux-amd64.tar.gz
+$ rm -r node_exporter-1.3.1.linux-amd64
+```
+
+Node Exporter将被配置为作为后台服务运行。为服务创建一个帐户以在其下运行。这种类型的帐户无法登录服务器。
+```shell
+$ sudo useradd --no-create-home --shell /bin/false node_exporter
+```
+
+创建一个systemd服务配置文件来配置该服务。
+```shell
+$ sudo nano /etc/systemd/system/node_exporter.service
+```
+
+将以下服务配置粘贴到文件中。
+```shell
+[Unit]
+Description=Node Exporter
+Wants=network-online.target
+After=network-online.target
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/node_exporter
+[Install]
+WantedBy=multi-user.target
+```
+
+参考下方的截图。
+
+<img src="./img/以太坊质押指南56.webp">
+
+按下<CTRL> + X，然后按Y，然后按<ENTER>保存并退出。
+
+重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
+```shell
+$ sudo systemctl daemon-reload
+$ sudo systemctl start node_exporter
+$ sudo systemctl status node_exporter
+```
+
+请参考下面的屏幕截图。它应该显示绿色文本中的"active (running)"。如果没有，则返回并重复步骤以解决问题。
+
+<img src="./img/以太坊质押指南57.webp">
+
+按Q退出（不会影响node_exporter服务）。
+
+使用日志输出通过运行以下命令来检查错误。
+```shell
+$ sudo journalctl -fu node_exporter
+```
+
+请参考下面的屏幕截图。
+
+<img src="./img/以太坊质押指南58.webp">
+
+按下<CTRL>+C退出（不会影响node_exporter服务）。
+
+启用node_exporter服务以在重新启动时自动启动。
+```shell
+$ sudo systemctl enable node_exporter
+```
+
+服务已安装。
+
+## 第17步 - 监控：安装Grafana
+Grafana提供报告仪表板功能。让我们安装并配置一个仪表板。
+
+下载Grafana的GPG密钥并将其添加到APT源中。
+```shell
+$ wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
+$ sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
+```
+
+刷新apt缓存。
+```shell
+$ sudo apt update
+```
+
+确保从存储库中安装了Grafana。
+```shell
+$ apt-cache policy grafana
+```
+
+输出应该如下所示：
+```shell
+grafana:
+  Installed: (none)
+  Candidate: 9.0.5
+  Version table:
+     9.0.5 500
+        500 https://packages.grafana.com/oss/deb stable/main amd64     
+  Packages
+     9.0.4 500
+        500 https://packages.grafana.com/oss/deb stable/main amd64 
+...
+```
+
+验证顶部的版本与此处显示的最新版本是否匹配。然后继续安装。
+```shell
+$ sudo apt install -y grafana
+```
+
+启动Grafana服务器并检查状态以确保它正常运行。
+```shell
+$ sudo systemctl start grafana-server
+$ sudo systemctl status grafana-server
+```
+
+请参考下面的屏幕截图。它应该显示绿色文本中的"active (running)"。如果没有，则返回并重复步骤以解决问题。
+
+<img src="./img/以太坊质押指南59.webp">
+
+按Q退出（不会影响grafana-server服务）。
+
+使用日志输出通过运行以下命令来检查错误。
+```shell
+$ sudo journalctl -fu grafana-server
+```
+
+请参考下面的屏幕截图。
+
+<img src="./img/以太坊质押指南60.webp">
+
+按下<CTRL>+C退出（不会影响grafana-server服务）。
+
+启用grafana-server服务以在重新启动时自动启动。
+```shell
+$ sudo systemctl enable grafana-server
+```
+
+### 配置Grafana登录
+做得很好！现在您已经完成了一切，可以在浏览器中访问`http://<yourserverip>:3000/`，应该会出现Grafana登录界面。
+
+输入admin作为用户名和密码。它会提示您更改密码，您应该确实这样做。
+
+### 配置Grafana数据源
+让我们配置一个数据源。将鼠标移动到左侧菜单栏底部的齿轮图标上。将弹出一个菜单 - 选择数据源。或者，直接导航到此处：`http://<yourserverip>:3000/datasources`
+
+<img src="./img/以太坊质押指南61.webp">
+
+点击"Add data source"，然后选择"Prometheus"。输入"http://localhost:9090"作为URL，然后点击"Save and Test"。
+
+<img src="./img/以太坊质押指南62.webp">
+
+<img src="./img/以太坊质押指南63.webp">
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+<img src="./img/以太坊质押指南64.webp">
 
 
 
