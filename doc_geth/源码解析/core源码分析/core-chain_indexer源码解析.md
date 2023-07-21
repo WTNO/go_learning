@@ -101,12 +101,170 @@ func NewChainIndexer(chainDb ethdb.Database, indexDb ethdb.Database, backend Cha
 }
 ```
 
+loadValidSections用来从数据库里面加载我们之前的处理信息， storedSections表示我们已经处理到哪里了。
+```go
+// loadValidSections reads the number of valid sections from the index database
+// and caches is into the local state.
+func (c *ChainIndexer) loadValidSections() {
+	data, _ := c.indexDb.Get([]byte("count"))
+	if len(data) == 8 {
+		c.storedSections = binary.BigEndian.Uint64(data)
+	}
+}
+```
 
+updateLoop是主要的事件循环，用于调用backend来处理区块链section，这个需要注意的是，所有的主索引节点和所有的 child indexer 都会启动这个goroutine 方法。
+```go
+// updateLoop is the main event loop of the indexer which pushes chain segments
+// down into the processing backend.
+func (c *ChainIndexer) updateLoop() {
+	var (
+		updating bool
+		updated  time.Time
+	)
 
+	for {
+		select {
+		case errc := <-c.quit:
+			// Chain indexer terminating, report no failure and abort
+			errc <- nil
+			return
 
+		case <-c.update:
+			// Section headers completed (or rolled back), update the index
+			c.lock.Lock()
+			if c.knownSections > c.storedSections {
+				// Periodically print an upgrade log message to the user
+				if time.Since(updated) > 8*time.Second {
+					if c.knownSections > c.storedSections+1 {
+						updating = true
+						c.log.Info("Upgrading chain index", "percentage", c.storedSections*100/c.knownSections)
+					}
+					updated = time.Now()
+				}
+				// Cache the current section count and head to allow unlocking the mutex
+				c.verifyLastHead()
+				section := c.storedSections
+				var oldHead common.Hash
+				if section > 0 {
+					oldHead = c.SectionHead(section - 1)
+				}
+				// Process the newly defined section in the background
+				c.lock.Unlock()
+				newHead, err := c.processSection(section, oldHead)
+				if err != nil {
+					select {
+					case <-c.ctx.Done():
+						<-c.quit <- nil
+						return
+					default:
+					}
+					c.log.Error("Section processing failed", "error", err)
+				}
+				c.lock.Lock()
 
+				// If processing succeeded and no reorgs occurred, mark the section completed
+				if err == nil && (section == 0 || oldHead == c.SectionHead(section-1)) {
+					c.setSectionHead(section, newHead)
+					c.setValidSections(section + 1)
+					if c.storedSections == c.knownSections && updating {
+						updating = false
+						c.log.Info("Finished upgrading chain index")
+					}
+					c.cascadedHead = c.storedSections*c.sectionSize - 1
+					for _, child := range c.children {
+						c.log.Trace("Cascading chain index update", "head", c.cascadedHead)
+						child.newHead(c.cascadedHead, false)
+					}
+				} else {
+					// If processing failed, don't retry until further notification
+					c.log.Debug("Chain index processing failed", "section", section, "err", err)
+					c.verifyLastHead()
+					c.knownSections = c.storedSections
+				}
+			}
+			// If there are still further sections to process, reschedule
+			if c.knownSections > c.storedSections {
+				time.AfterFunc(c.throttling, func() {
+					select {
+					case c.update <- struct{}{}:
+					default:
+					}
+				})
+			}
+			c.lock.Unlock()
+		}
+	}
+}
+```
 
+Start方法在eth协议启动的时候被调用,这个方法接收两个参数，一个是当前的区块头，一个是事件订阅器，通过这个订阅器可以获取区块链的改变信息。
+```go
+// backend.go
+func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+    ...
+	eth.bloomIndexer.Start(eth.blockchain)
+    ...
+}
 
+// Start creates a goroutine to feed chain head events into the indexer for
+// cascading background processing. Children do not need to be started, they
+// are notified about new events by their parents.
+func (c *ChainIndexer) Start(chain ChainIndexerChain) {
+	events := make(chan ChainHeadEvent, 10)
+	sub := chain.SubscribeChainHeadEvent(events)
+
+	go c.eventLoop(chain.CurrentHeader(), events, sub)
+}
+
+// eventLoop is a secondary - optional - event loop of the indexer which is only
+// started for the outermost indexer to push chain head events into a processing
+// queue.
+func (c *ChainIndexer) eventLoop(currentHeader *types.Header, events chan ChainHeadEvent, sub event.Subscription) {
+    // Mark the chain indexer as active, requiring an additional teardown
+    c.active.Store(true)
+    
+    defer sub.Unsubscribe()
+    
+    // Fire the initial new head event to start any outstanding processing
+    c.newHead(currentHeader.Number.Uint64(), false)
+    
+    var (
+        prevHeader = currentHeader
+        prevHash   = currentHeader.Hash()
+    )
+    for {
+        select {
+        case errc := <-c.quit:
+            // Chain indexer terminating, report no failure and abort
+            errc <- nil
+            return
+        
+        case ev, ok := <-events:
+            // Received a new event, ensure it's not nil (closing) and update
+            if !ok {
+                errc := <-c.quit
+                errc <- nil
+                return
+            }
+            header := ev.Block.Header()
+            if header.ParentHash != prevHash {
+                // Reorg to the common ancestor if needed (might not exist in light sync mode, skip reorg then)
+                // TODO(karalabe, zsfelfoldi): This seems a bit brittle, can we detect this case explicitly?
+                
+                if rawdb.ReadCanonicalHash(c.chainDb, prevHeader.Number.Uint64()) != prevHash {
+                    if h := rawdb.FindCommonAncestor(c.chainDb, prevHeader, header); h != nil {
+                        c.newHead(h.Number.Uint64(), true)
+                    }
+                }
+            }
+            c.newHead(header.Number.Uint64(), false)
+            
+            prevHeader, prevHash = header, header.Hash()
+        }
+    }
+}
+```
 
 
 
