@@ -1583,4 +1583,3 @@ $ sudo /usr/local/bin/validator accounts voluntary-exit --wallet-dir=/var/lib/pr
 <img src="./img/以太坊质押指南74.webp">
 
 > ***注意：验证器退出可能需要一些时间。您可以通过在 https://goerli.beaconcha.in/ 上搜索验证器密钥来检查退出的状态。如果链没有最终确定，退出将无法成功。一旦退出成功，您可以停止您的服务，如果需要的话。***
-
