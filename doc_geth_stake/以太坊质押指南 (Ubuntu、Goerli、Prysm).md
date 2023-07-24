@@ -199,7 +199,7 @@ Port YourSSHPortNumber
 
 <img src="./img/以太坊质押指南7.webp">
 
-按下<CTRL> + X，然后按下Y，然后按下<ENTER>以保存并退出。
+按下CTRL + X，然后按下Y，然后按下<ENTER>以保存并退出。
 
 重新启动SSH服务以反映更改。
 ```shell
@@ -365,7 +365,7 @@ vm.vfs_cache_pressure = 50
 
 <img src="./img/以太坊质押指南12.webp">
 
-按下<CTRL> + X，然后按Y，然后按<ENTER>保存并退出。
+按下CTRL + X，然后按Y，然后按<ENTER>保存并退出。
 
 现在已配置交换文件。可以使用htop命令进行监视。
 
@@ -407,7 +407,7 @@ $ sudo nano /var/lib/jwtsecret/jwt.hex
 
 <img src="./img/以太坊质押指南15.webp">
 
-按下<CTRL>+X退出。
+按下CTRL+X退出。
 
 在指南的后面部分，jwt.hex文件的路径将被包含在执行客户端和共识客户端的配置中，以便它们可以对传入和传出的消息进行身份验证。
 
@@ -520,7 +520,7 @@ WantedBy=default.target
 
 <img src="./img/以太坊质押指南22.webp">
 
-按下<CTRL> + X，然后按Y，最后按<ENTER>键保存并退出。
+按下CTRL + X，然后按Y，最后按<ENTER>键保存并退出。
 
 重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
 ```shell
@@ -544,7 +544,7 @@ $ sudo journalctl -fu geth
 
 <img src="./img/以太坊质押指南24.webp">
 
-按下<CTRL>+ C键退出（不会影响geth服务）。
+按下CTRL+ C键退出（不会影响geth服务）。
 
 启用geth服务以在重新启动时自动启动。
 ```shell
@@ -656,7 +656,7 @@ $ sudo nano /var/lib/prysm/validator/password.txt
 
 <img src="./img/以太坊质押指南31.webp">
 
-按下<CTRL> + X，然后按Y，最后按<ENTER>以保存并退出。
+按下CTRL + X，然后按Y，最后按<ENTER>以保存并退出。
 
 导入完成，钱包已设置完毕。
 
@@ -732,7 +732,7 @@ WantedBy=multi-user.target
 
 <img src="./img/以太坊质押指南32.webp">
 
-按下<CTRL> + X然后Y然后<ENTER>以保存并退出。
+按下CTRL + X然后Y然后<ENTER>以保存并退出。
 
 重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
 ```shell
@@ -818,7 +818,7 @@ WantedBy=multi-user.target
 
 <img src="./img/以太坊质押指南35.webp">
 
-按下<CTRL> + X，然后按Y，然后按<ENTER>保存并退出。
+按下CTRL + X，然后按Y，然后按<ENTER>保存并退出。
 
 重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
 ```shell
@@ -1038,7 +1038,7 @@ scrape_configs:
 
 <img src="./img/以太坊质押指南51.webp">
 
-按下<CTRL> + X，然后按Y，再按<ENTER>保存并退出。
+按下CTRL + X，然后按Y，再按<ENTER>保存并退出。
 
 设置目录权限。Prometheus用户账户需要权限来修改这些目录。
 ```shell
@@ -1076,7 +1076,7 @@ WantedBy=multi-user.target
 
 <img src="./img/以太坊质押指南52.webp">
 
-按下<CTRL> + X，然后按Y，再按<ENTER>保存并退出。
+按下CTRL + X，然后按Y，再按<ENTER>保存并退出。
 
 重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
 ```shell
@@ -1100,7 +1100,7 @@ $ sudo journalctl -fu prometheus
 
 <img src="./img/以太坊质押指南54.webp">
 
-按下<CTRL>+C退出（不会影响Prometheus服务）。
+按下CTRL+C退出（不会影响Prometheus服务）。
 
 启用Prometheus服务以在重新启动时自动启动。
 ```shell
@@ -1167,7 +1167,7 @@ WantedBy=multi-user.target
 
 <img src="./img/以太坊质押指南56.webp">
 
-按下<CTRL> + X，然后按Y，然后按<ENTER>保存并退出。
+按下CTRL + X，然后按Y，然后按<ENTER>保存并退出。
 
 重新加载systemd以反映更改并启动服务。检查状态以确保它正常运行。
 ```shell
@@ -1191,7 +1191,7 @@ $ sudo journalctl -fu node_exporter
 
 <img src="./img/以太坊质押指南58.webp">
 
-按下<CTRL>+C退出（不会影响node_exporter服务）。
+按下CTRL+C退出（不会影响node_exporter服务）。
 
 启用node_exporter服务以在重新启动时自动启动。
 ```shell
@@ -1259,7 +1259,7 @@ $ sudo journalctl -fu grafana-server
 
 <img src="./img/以太坊质押指南60.webp">
 
-按下<CTRL>+C退出（不会影响grafana-server服务）。
+按下CTRL+C退出（不会影响grafana-server服务）。
 
 启用grafana-server服务以在重新启动时自动启动。
 ```shell
