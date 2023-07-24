@@ -563,7 +563,7 @@ $ sudo systemctl enable geth
 ## 第9步 - 安装Prysm共识客户端
 Prysm共识客户端由两个二进制文件组成，分别提供信标节点和验证器的功能。这一步将下载并准备Prysm二进制文件。
 
-首先，前往此处并确定最新版本。它位于页面顶部。例如：
+首先，前往[此处](https://github.com/prysmaticlabs/prysm/releases)并确定最新版本。它位于页面顶部。例如：
 
 <img src="./img/以太坊质押指南25.webp">
 
@@ -1583,3 +1583,22 @@ $ sudo /usr/local/bin/validator accounts voluntary-exit --wallet-dir=/var/lib/pr
 <img src="./img/以太坊质押指南74.webp">
 
 > ***注意：验证器退出可能需要一些时间。您可以通过在 https://goerli.beaconcha.in/ 上搜索验证器密钥来检查退出的状态。如果链没有最终确定，退出将无法成功。一旦退出成功，您可以停止您的服务，如果需要的话。***
+
+## 附录 K — 扩展逻辑卷
+在某些情况下，Ubuntu 只为较大的固态硬盘分配了 200GB 的空间，导致用户在同步 Eth1 节点时磁盘空间不足。错误消息类似于：
+```shell
+Fatal: Failed to register the Ethereum service: write /var/lib/goethereum/geth/chaindata/383234.ldb: no space left on device
+```
+
+为了解决这个问题，假设您有一块大于 200GB 的固态硬盘，按照以下步骤扩展 LVM 的空间分配：
+```shell
+$ sudo lvdisplay # <-- 检查您的逻辑卷大小
+$ sudo lvm
+> lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+> lvextend -l +100%FREE -r /dev/ubuntu-vg/ubuntu-lv
+> exit
+$ sudo resize2fs /dev/ubuntu-vg/ubuntu-lv
+$ df -h # <-- 检查结果
+```
+
+这样应该将您的磁盘大小调整为最大可用空间。
