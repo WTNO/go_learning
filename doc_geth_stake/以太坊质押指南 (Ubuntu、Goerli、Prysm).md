@@ -1112,7 +1112,7 @@ $ sudo systemctl enable prometheus
 ## 步骤16 — 监控：安装Node Exporter
 Node Exporter服务公开了您的Ubuntu服务器的操作系统指标。
 
-请访问此处获取Node Exporter的最新发布版本（不是预发布版本）。
+请访问[此处](https://prometheus.io/download/#node_exporter)获取Node Exporter的最新发布版本（不是预发布版本）。
 
 <img src="./img/以太坊质押指南55.webp">
 
