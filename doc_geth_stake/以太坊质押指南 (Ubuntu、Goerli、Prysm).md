@@ -1209,6 +1209,9 @@ $ wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
 $ sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
 ```
 
+> 使用add-apt-repository命令前需要通过root执行apt-get install software-properties-common
+
+
 刷新apt缓存。
 ```shell
 $ sudo apt update
