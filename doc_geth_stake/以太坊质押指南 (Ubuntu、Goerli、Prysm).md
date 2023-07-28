@@ -1306,7 +1306,7 @@ $ sudo systemctl enable grafana-server
 在导入屏幕上，将ID输入到第一个框中（Besu或Geth），或者将链接中的JSON文本粘贴到所需客户端的框中（Erigon或Nethermind）。您可能还需要选择数据源（Prometheus）。
 
 ### 共识客户端仪表板
-在导入屏幕上，将此处的JSON文本粘贴到框中。将其重命名为Prysm。
+在导入屏幕上，将[此处](https://docs.prylabs.network/assets/grafana-dashboards/small_amount_validators.json)的JSON文本粘贴到框中。将其重命名为Prysm。
 
 <img src="./img/以太坊质押指南66.webp">
 
