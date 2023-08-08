@@ -203,4 +203,3 @@ close $spawn_id
 
 ## 引用
 https://en.wikipedia.org/wiki/Expect
-
