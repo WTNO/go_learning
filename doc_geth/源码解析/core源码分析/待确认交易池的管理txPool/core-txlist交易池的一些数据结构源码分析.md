@@ -396,21 +396,199 @@ func (l *list) Flatten() types.Transactions {
 ```
 
 ## priceHeap
+priceHeap是一个最小堆， 按照价格的大小来建堆。
+```go
+// priceHeap是一个基于交易的堆接口实现，用于按价格排序的交易检索，以便在池填满时丢弃。
+// 如果设置了baseFee，则堆根据给定的基础费用计算出的有效小费进行排序。
+// 如果baseFee为nil，则根据gasFeeCap进行排序。
+type priceHeap struct {
+	baseFee *big.Int // 在baseFee更改后，堆应该重新排序
+	list    []*types.Transaction
+}
 
+func (h *priceHeap) Len() int      { return len(h.list) }
 
+func (h *priceHeap) Swap(i, j int) { h.list[i], h.list[j] = h.list[j], h.list[i] }
 
+func (h *priceHeap) Less(i, j int) bool {
+	switch h.cmp(h.list[i], h.list[j]) {
+	case -1:
+		return true
+	case 1:
+		return false
+	default:
+		return h.list[i].Nonce() > h.list[j].Nonce()
+	}
+}
 
+func (h *priceHeap) cmp(a, b *types.Transaction) int {
+	if h.baseFee != nil {
+		// 如果指定了baseFee，则比较有效小费
+		if c := a.EffectiveGasTipCmp(b, h.baseFee); c != 0 {
+			return c
+		}
+	}
+	// 如果未指定baseFee或有效小费相等，则比较费用上限
+	if c := a.GasFeeCapCmp(b); c != 0 {
+		return c
+	}
+	// 如果有效小费和费用上限相等，则比较小费上限
+	return a.GasTipCapCmp(b)
+}
 
+func (h *priceHeap) Push(x interface{}) {
+	tx := x.(*types.Transaction)
+	h.list = append(h.list, tx)
+}
 
+func (h *priceHeap) Pop() interface{} {
+	old := h.list
+	n := len(old)
+	x := old[n-1]
+	old[n-1] = nil
+	h.list = old[0 : n-1]
+	return x
+}
+```
 
+## pricedList
+pricedList 是基于价格排序的堆，允许按照价格递增的方式处理交易。
 
+### 数据结构和构建
+```go
+// pricedList是一个价格排序的堆，用于对交易池中的交易内容进行操作。
+// 它基于txpool中的所有交易构建，但只关注远程交易部分。
+// 这意味着只有远程交易会被考虑进行跟踪、排序、剔除等操作。
+// 
+// 使用两个堆进行排序：紧急堆（基于下一个区块的有效小费）和浮动堆（基于gasFeeCap）。
+// 始终选择较大的堆进行剔除。从紧急堆中剔除的交易首先被降级到浮动堆中。
+// 在某些情况下（拥堵时，区块已满），紧急堆可以提供更好的包含候选项，
+// 而在其他情况下（在baseFee峰值的顶部），浮动堆更好。当baseFee降低时，它们的行为类似。
 
+type pricedList struct {
+	// 过时价格点的数量（重新堆化的触发器）。
+	stales atomic.Int64
 
+	all              *lookup    // 所有交易的映射指针
+	urgent, floating priceHeap  // 存储所有**远程**交易价格的堆
+	reheapMu         sync.Mutex // 互斥锁，确保只有一个例程在重新堆化列表
+}
 
+// newPricedList创建一个新的按价格排序的交易堆。
+func newPricedList(all *lookup) *pricedList {
+	return &pricedList{
+		all: all,
+	}
+}
+```
 
+### Put
+```go
+// Put方法将一个新的交易插入堆中。
+func (l *pricedList) Put(tx *types.Transaction, local bool) {
+	if local {
+		return
+	}
+	// 首先将每个新交易插入紧急堆中；Discard方法将平衡堆
+	heap.Push(&l.urgent, tx)
+}
+```
 
+### Removed
+```go
+// Removed通知价格交易列表一个旧的交易已从池中移除。
+// 列表将仅保留一个过期对象的计数器，并在足够比例的交易过期时更新堆。
+func (l *pricedList) Removed(count int) {
+	// 增加过期计数器，但如果仍然太低（< 25%）则退出
+	stales := l.stales.Add(int64(count))
+	if int(stales) <= (len(l.urgent.list)+len(l.floating.list))/4 {
+		return
+	}
+	// 看起来我们已经达到了关键数量的过期交易，重新堆化
+	l.Reheap()
+}
+```
 
+### ~~Cap~~
 
+### Underpriced
+检查`tx`是否比当前`pricedList`里面最便宜的交易还要便宜或者是同样便宜.
+```go
+// Underpriced函数检查一个交易是否比（或与）当前正在跟踪的最低价（远程）交易便宜。
+func (l *pricedList) Underpriced(tx *types.Transaction) bool {
+	// 注意：在有两个队列的情况下，被低估被定义为比所有非空队列中的最差项目更糟糕。
+	// 如果两个队列都为空，则没有东西被低估。
+	return (l.underpricedFor(&l.urgent, tx) || len(l.urgent.list) == 0) &&
+		(l.underpricedFor(&l.floating, tx) || len(l.floating.list) == 0) &&
+		(len(l.urgent.list) != 0 || len(l.floating.list) != 0)
+}
+
+// underpricedFor函数检查一个交易是否比给定堆中的最低价（远程）交易便宜。
+func (l *pricedList) underpricedFor(h *priceHeap, tx *types.Transaction) bool {
+	// 如果在堆的开头找到了过时的价格点，则丢弃它们
+	for len(h.list) > 0 {
+		head := h.list[0]
+		if l.all.GetRemote(head.Hash()) == nil { // 被删除或迁移
+			l.stales.Add(-1)
+			heap.Pop(h)
+			continue
+		}
+		break
+	}
+	// 检查交易是否被低估
+	if len(h.list) == 0 {
+		return false // 没有远程交易。
+	}
+	// 如果远程交易甚至比本地跟踪的最便宜的交易还便宜，则拒绝它。
+	return h.cmp(h.list[0], tx) >= 0
+}
+```
+
+### Discard
+查找一定数量的最便宜的交易,把他们从当前的列表删除并返回
+```go
+// Discard 函数用于找到最低价的一些交易，并从价格列表中移除它们，然后返回这些交易以便从整个池中进一步移除。
+// 如果 noPending 设置为 true，我们只会考虑浮动列表中的交易。
+//
+// 注意，本地交易不会被考虑在内。
+func (l *pricedList) Discard(slots int, force bool) (types.Transactions, bool) {
+	drop := make(types.Transactions, 0, slots) // 要移除的低价交易
+	for slots > 0 {
+		if len(l.urgent.list)*floatingRatio > len(l.floating.list)*urgentRatio || floatingRatio == 0 {
+			// 如果在清理过程中发现陈旧的交易，则将其丢弃
+			tx := heap.Pop(&l.urgent).(*types.Transaction)
+			if l.all.GetRemote(tx.Hash()) == nil { // 被移除或已迁移
+				l.stales.Add(-1)
+				continue
+			}
+			// 发现非陈旧交易，移到浮动堆中
+			heap.Push(&l.floating, tx)
+		} else {
+			if len(l.floating.list) == 0 {
+				// 如果两个堆都为空，则停止
+				break
+			}
+			// 如果在清理过程中发现陈旧的交易，则将其丢弃
+			tx := heap.Pop(&l.floating).(*types.Transaction)
+			if l.all.GetRemote(tx.Hash()) == nil { // 被移除或已迁移
+				l.stales.Add(-1)
+				continue
+			}
+			// 发现非陈旧交易，将其丢弃
+			drop = append(drop, tx)
+			slots -= numSlots(tx)
+		}
+	}
+	// 如果仍然无法为新交易腾出足够的空间
+	if slots > 0 && !force {
+		for _, tx := range drop {
+			heap.Push(&l.urgent, tx)
+		}
+		return nil, false
+	}
+	return drop, true
+}
+```
 
 
 
