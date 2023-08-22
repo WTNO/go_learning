@@ -269,7 +269,7 @@ func main() {
 ```
 
 ### 通用的Spawner
-Go Expect包支持使用func `SpawnGeneric(opt *GenOptions, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error)` 函数添加新的Spawner。
+Go Expect包支持使用`func SpawnGeneric(opt *GenOptions, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error)` 函数添加新的Spawner。
 
 telnet spawner
 
