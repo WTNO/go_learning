@@ -600,4 +600,3 @@ func (l *pricedList) Discard(slots int, force bool) (types.Transactions, bool) {
 
 
 
-
