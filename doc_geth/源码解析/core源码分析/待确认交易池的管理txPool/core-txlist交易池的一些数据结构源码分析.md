@@ -96,17 +96,119 @@ func (m *sortedMap) Forward(threshold uint64) types.Transactions {
 }
 ```
 
+### Filter
+删除所有令filter函数调用返回true的交易，并返回那些交易。
+```go
+// Filter函数遍历交易列表，删除所有满足指定函数为true的交易。
+// 与'filter'不同的是，Filter在操作完成后重新初始化堆。
+// 如果您想进行连续的多次过滤，最好先使用.filter(func1)，然后再使用.Filter(func2)或reheap()。
+func (m *sortedMap) Filter(filter func(*types.Transaction) bool) types.Transactions {
+	removed := m.filter(filter)
+	// 如果有交易被删除，堆和缓存将被破坏
+	if len(removed) > 0 {
+		m.reheap()
+	}
+	return removed
+}
 
+func (m *sortedMap) reheap() {
+	*m.index = make([]uint64, 0, len(m.items))
+	for nonce := range m.items {
+		*m.index = append(*m.index, nonce)
+	}
+	heap.Init(m.index)
+	m.cache = nil
+}
+```
 
+### Cap
+对items里面的数量有限制，返回超过限制的所有交易。
+```go
+// Cap函数对项目数量设置了一个硬限制，返回超过该限制的所有交易。
+func (m *sortedMap) Cap(threshold int) types.Transactions {
+	// 如果项目数量低于限制，则直接返回
+	if len(m.items) <= threshold {
+		return nil
+	}
+	// 否则收集并删除最高nonce的交易
+	var drops types.Transactions
 
+	sort.Sort(*m.index)
+	for size := len(m.items); size > threshold; size-- {
+		drops = append(drops, m.items[(*m.index)[size-1]])
+		delete(m.items, (*m.index)[size-1])
+	}
+	*m.index = (*m.index)[:threshold]
+	heap.Init(m.index)
 
+	// 如果存在缓存，则将其向后移动
+	if m.cache != nil {
+		m.cache = m.cache[:len(m.cache)-len(drops)]
+	}
+	return drops
+}
+```
 
+### Remove
+```go
+// Remove函数从维护的映射中删除一个交易，返回是否找到该交易。
+func (m *sortedMap) Remove(nonce uint64) bool {
+	// 如果没有交易存在，则直接返回
+	_, ok := m.items[nonce]
+	if !ok {
+		return false
+	}
+	// 否则删除交易并修复堆索引
+	for i := 0; i < m.index.Len(); i++ {
+		if (*m.index)[i] == nonce {
+			heap.Remove(m.index, i)
+			break
+		}
+	}
+	delete(m.items, nonce)
+	m.cache = nil
 
+	return true
+}
+```
 
+### Ready
+```go
+// Ready函数检索从提供的nonce开始的顺序递增的交易列表，这些交易已准备好进行处理。
+// 返回的交易将从列表中删除。
+// 
+// 注意，为了防止进入无效状态，还将返回所有nonce低于start的交易。
+// 虽然这不应该发生，但更好的是自我纠正而不是失败！
+func (m *sortedMap) Ready(start uint64) types.Transactions {
+	// 如果没有可用的交易，则直接返回
+	if m.index.Len() == 0 || (*m.index)[0] > start {
+		return nil
+	}
+	// 否则开始累积增量交易
+	var ready types.Transactions
+	for next := (*m.index)[0]; m.index.Len() > 0 && (*m.index)[0] == next; next++ {
+		ready = append(ready, m.items[next])
+		delete(m.items, next)
+		heap.Pop(m.index)
+	}
+	m.cache = nil
 
+	return ready
+}
+```
 
-
-
+### Flatten
+返回一个基于nonce排序的交易列表。并缓存到cache字段里面，以便在没有修改的情况下反复使用。
+```go
+// Flatten函数基于松散排序的内部表示创建一个按照nonce排序的交易切片。为了防止在内容被修改之前再次请求排序结果，排序结果会被缓存起来。
+func (m *sortedMap) Flatten() types.Transactions {
+	// 复制缓存以防止意外修改
+	cache := m.flatten()
+	txs := make(types.Transactions, len(cache))
+	copy(txs, cache)
+	return txs
+}
+```
 
 
 
