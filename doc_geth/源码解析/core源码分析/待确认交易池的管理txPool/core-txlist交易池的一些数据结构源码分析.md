@@ -1,4 +1,4 @@
-## nonceHeap
+## nonceHeap(core/txpool/legacypool/list.go)
 nonceHeap实现了一个heap.Interface的数据结构，用来实现了一个堆的数据结构。 在heap.Interface的文档介绍中，默认实现的是最小堆。
 
 如果h是一个数组，只要数组中的数据满足下面的要求。那么就认为h是一个最小堆。
@@ -590,13 +590,162 @@ func (l *pricedList) Discard(slots int, force bool) (types.Transactions, bool) {
 }
 ```
 
+## accountSet(core/txpool/legacypool/legacypool.go)
+accountSet 就是一个账号的集合和一个处理签名的对象.
+```go
+// accountSet是一个简单的地址集合，用于检查存在性，并且包含一个能够从交易中派生地址的签名者。
+type accountSet struct {
+	accounts map[common.Address]struct{} // 地址集合
+	signer   types.Signer // 签名者
+	cache    *[]common.Address // 地址缓存
+}
 
+// newAccountSet创建一个新的地址集合，并关联一个用于派生发送者地址的签名者。
+func newAccountSet(signer types.Signer, addrs ...common.Address) *accountSet {
+	as := &accountSet{
+		accounts: make(map[common.Address]struct{}, len(addrs)),
+		signer:   signer,
+	}
+	for _, addr := range addrs {
+		as.add(addr)
+	}
+	return as
+}
 
+// contains检查给定的地址是否存在于集合中。
+func (as *accountSet) contains(addr common.Address) bool {
+	_, exist := as.accounts[addr]
+	return exist
+}
 
+// containsTx检查给定交易的发送者是否在集合中。如果无法派生发送者地址，则返回false。
+func (as *accountSet) containsTx(tx *types.Transaction) bool {
+	if addr, err := types.Sender(as.signer, tx); err == nil {
+		return as.contains(addr)
+	}
+	return false
+}
 
+// add向集合中插入一个新的地址以进行跟踪。
+func (as *accountSet) add(addr common.Address) {
+	as.accounts[addr] = struct{}{}
+	as.cache = nil
+}
 
+// addTx将交易的发送者添加到集合中。
+func (as *accountSet) addTx(tx *types.Transaction) {
+	if addr, err := types.Sender(as.signer, tx); err == nil {
+		as.add(addr)
+	}
+}
 
+// flatten返回此集合中的地址列表，并为以后的重用进行缓存。
+// 返回的切片不应被修改！
+func (as *accountSet) flatten() []common.Address {
+    if as.cache == nil {
+        accounts := make([]common.Address, 0, len(as.accounts))
+        for account := range as.accounts {
+            accounts = append(accounts, account)
+        }
+        as.cache = &accounts
+    }
+    return *as.cache
+}
 
+// merge将'other'集合中的所有地址添加到'as'中。
+func (as *accountSet) merge(other *accountSet) {
+    for addr := range other.accounts {
+        as.accounts[addr] = struct{}{}
+    }
+    as.cache = nil
+}
+```
 
+## journal(core/txpool/legacypool/journal.go)
+journal是交易的一个循环日志，其目的是存储本地创建的事务，以允许未执行的事务在节点重新启动后继续运行。 
+
+### 结构
+```go
+// journal是一个旋转的交易日志，旨在存储本地创建的交易，以便非执行的交易能够在节点重新启动时保留下来。
+type journal struct {
+	path   string         // 存储交易的文件系统路径
+	writer io.WriteCloser // 输出流，用于写入新的交易
+}
+```
+
+### newTxJournal
+用来创建新的交易日志.
+```go
+// newTxJournal creates a new transaction journal to
+func newTxJournal(path string) *journal {
+	return &journal{
+		path: path,
+	}
+}
+```
+
+### load
+从磁盘解析交易,然后调用add回调方法.
+```go
+// load函数从磁盘解析事务日志转储，并将其内容加载到指定的池中。
+func (journal *journal) load(add func([]*types.Transaction) []error) error {
+	// 打开日志文件以加载之前的所有事务
+	input, err := os.Open(journal.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		// 如果日志文件根本不存在，则跳过解析
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+
+	// 暂时丢弃任何日志添加（加载时不要重复添加）
+	journal.writer = new(devNull)
+	defer func() { journal.writer = nil }()
+
+	// 将日志中的所有事务注入到池中
+	stream := rlp.NewStream(input, 0)
+	total, dropped := 0, 0
+
+	// 创建一个方法来加载有限批次的事务并增加相应的进度计数器。
+	// 然后使用该方法以较小的批次加载所有记录的事务。
+	loadBatch := func(txs types.Transactions) {
+		for _, err := range add(txs) {
+			if err != nil {
+				log.Debug("无法添加记录的事务", "错误", err)
+				dropped++
+			}
+		}
+	}
+	var (
+		failure error
+		batch   types.Transactions
+	)
+	for {
+		// 解析下一个事务，并在错误时终止
+		tx := new(types.Transaction)
+		if err = stream.Decode(tx); err != nil {
+			if err != io.EOF {
+				failure = err
+			}
+			if batch.Len() > 0 {
+				loadBatch(batch)
+			}
+			break
+		}
+		// 新事务已解析，稍后排队，如果达到阈值，则导入
+		total++
+
+		if batch = append(batch, tx); batch.Len() > 1024 {
+			loadBatch(batch)
+			batch = batch[:0]
+		}
+	}
+	log.Info("已加载本地事务日志", "事务数", total, "丢弃数", dropped)
+
+	return failure
+}
+```
 
 
