@@ -552,4 +552,3 @@ func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool) int {
 
 
 
-
