@@ -337,16 +337,212 @@ func (pool *LegacyPool) demoteUnexecutables() {
 }
 ```
 
+### enqueueTx
+把一个新的交易插入到future queue。 这个方法假设已经获取了池的锁。
+```go
+// enqueueTx将一个新的交易插入到不可执行的交易队列中。
+//
+// 注意，该方法假设池锁已经被持有！
+func (pool *LegacyPool) enqueueTx(hash common.Hash, tx *types.Transaction, local bool, addAll bool) (bool, error) {
+	// 尝试将交易插入到未来队列中
+	from, _ := types.Sender(pool.signer, tx) // 已经验证过
+	if pool.queue[from] == nil {
+		pool.queue[from] = newList(false)
+	}
+	inserted, old := pool.queue[from].Add(tx, pool.config.PriceBump)
+	if !inserted {
+		// 有一个更早的交易更好，丢弃该交易
+		queuedDiscardMeter.Mark(1)
+		return false, txpool.ErrReplaceUnderpriced
+	}
+	// 丢弃任何先前的交易并标记这个交易
+	if old != nil {
+		pool.all.Remove(old.Hash())
+		pool.priced.Removed(1)
+		queuedReplaceMeter.Mark(1)
+	} else {
+		// 没有替换任何交易，增加排队计数器
+		queuedGauge.Inc(1)
+	}
+	// 如果交易不在查找集中但是预期应该在那里，显示错误日志。
+	if pool.all.Get(hash) == nil && !addAll {
+		log.Error("在查找集中找不到交易，请报告此问题", "hash", hash)
+	}
+	if addAll {
+		pool.all.Add(tx, local)
+		pool.priced.Put(tx, local)
+	}
+	// 如果我们从未记录过心跳，则立即记录。
+	if _, exist := pool.beats[from]; !exist {
+		pool.beats[from] = time.Now()
+	}
+	return old != nil, nil
+}
+```
 
+### promoteExecutables(和以前版本改动较大)
+把已经变得可以执行的交易从future queue 插入到pending queue。通过这个处理过程，所有的无效的交易(nonce太低，余额不足)会被删除。
+```go
+// promoteExecutables 函数将已经可以处理的交易从未来队列移动到待处理交易集合中。在此过程中，所有无效的交易（低nonce，低余额）将被删除。
+func (pool *LegacyPool) promoteExecutables(accounts []common.Address) []*types.Transaction {
+	// 跟踪要一次广播的已提升交易
+	var promoted []*types.Transaction
 
+	// 遍历所有账户并提升任何可执行的交易
+	gasLimit := pool.currentHead.Load().GasLimit
+	for _, addr := range accounts {
+		list := pool.queue[addr]
+		if list == nil {
+			continue // 以防万一有人使用不存在的账户调用
+		}
+		// 删除所有被认为太旧（低nonce）的交易
+		forwards := list.Forward(pool.currentState.GetNonce(addr))
+		for _, tx := range forwards {
+			hash := tx.Hash()
+			pool.all.Remove(hash)
+		}
+		log.Trace("删除旧的排队交易", "数量", len(forwards))
+		// 删除所有成本过高（低余额或燃料不足）的交易
+		drops, _ := list.Filter(pool.currentState.GetBalance(addr), gasLimit)
+		for _, tx := range drops {
+			hash := tx.Hash()
+			pool.all.Remove(hash)
+		}
+		log.Trace("删除无法支付的排队交易", "数量", len(drops))
+		queuedNofundsMeter.Mark(int64(len(drops)))
 
+		// 收集所有可执行的交易并提升它们
+		readies := list.Ready(pool.pendingNonces.get(addr))
+		for _, tx := range readies {
+			hash := tx.Hash()
+			if pool.promoteTx(addr, hash, tx) {
+				promoted = append(promoted, tx)
+			}
+		}
+		log.Trace("提升排队交易", "数量", len(promoted))
+		queuedGauge.Dec(int64(len(readies)))
 
+		// 删除所有超过允许限制的交易
+		var caps types.Transactions
+		if !pool.locals.contains(addr) {
+			caps = list.Cap(int(pool.config.AccountQueue))
+			for _, tx := range caps {
+				hash := tx.Hash()
+				pool.all.Remove(hash)
+				log.Trace("删除超过限制的排队交易", "哈希", hash)
+			}
+			queuedRateLimitMeter.Mark(int64(len(caps)))
+		}
+		// 将所有被删除的项目标记为已删除
+		pool.priced.Removed(len(forwards) + len(drops) + len(caps))
+		queuedGauge.Dec(int64(len(forwards) + len(drops) + len(caps)))
+		if pool.locals.contains(addr) {
+			localGauge.Dec(int64(len(forwards) + len(drops) + len(caps)))
+		}
+		// 如果队列为空，则删除整个队列条目。
+		if list.Empty() {
+			delete(pool.queue, addr)
+			delete(pool.beats, addr)
+		}
+	}
+	return promoted
+}
+```
 
+### promoteTx
+把某个交易加入到pending 队列. 这个方法假设已经获取到了锁.
+```go
+// promoteTx将一个交易添加到待处理的交易列表中，并返回是否插入成功或是否存在更好的旧交易。
 
+// 注意，该方法假设池锁已经被持有！
 
+func (pool *LegacyPool) promoteTx(addr common.Address, hash common.Hash, tx *types.Transaction) bool {
+	// 尝试将交易插入到待处理队列中
+	if pool.pending[addr] == nil {
+		pool.pending[addr] = newList(true)
+	}
+	list := pool.pending[addr]
 
+	inserted, old := list.Add(tx, pool.config.PriceBump)
+	if !inserted {
+		// 旧交易更好，丢弃当前交易
+		pool.all.Remove(hash)
+		pool.priced.Removed(1)
+		pendingDiscardMeter.Mark(1)
+		return false
+	}
+	// 否则，丢弃任何先前的交易并标记此交易
+	if old != nil {
+		pool.all.Remove(old.Hash())
+		pool.priced.Removed(1)
+		pendingReplaceMeter.Mark(1)
+	} else {
+		// 没有替换任何交易，增加待处理计数器
+		pendingGauge.Inc(1)
+	}
+	// 设置可能的新待处理nonce，并通知任何子系统有新的交易
+	pool.pendingNonces.set(addr, tx.Nonce()+1)
 
+	// 成功推广，增加心跳计数器
+	pool.beats[addr] = time.Now()
+	return true
+}
+```
 
+### removeTx
+删除某个交易， 并把所有后续的交易移动到future queue
+```go
+// removeTx从队列中移除一笔交易，将所有后续的交易移回到未来队列中。
+// 返回从待处理队列中移除的交易数量。
+func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool) int {
+	// 获取我们要删除的交易
+	tx := pool.all.Get(hash)
+	if tx == nil {
+		return 0
+	}
+	addr, _ := types.Sender(pool.signer, tx) // 在插入期间已经验证过
+
+	// 从已知交易列表中删除它
+	pool.all.Remove(hash)
+	if outofbound {
+		pool.priced.Removed(1)
+	}
+	if pool.locals.contains(addr) {
+		localGauge.Dec(1)
+	}
+	// 从待处理列表中删除交易并重置账户nonce
+	if pending := pool.pending[addr]; pending != nil {
+		if removed, invalids := pending.Remove(tx); removed {
+			// 如果没有更多待处理交易了，删除列表
+			if pending.Empty() {
+				delete(pool.pending, addr)
+			}
+			// 推迟任何无效的交易
+			for _, tx := range invalids {
+				// 内部移动不应影响查找集合
+				pool.enqueueTx(tx.Hash(), tx, false, false)
+			}
+			// 如果需要，更新账户nonce
+			pool.pendingNonces.setIfLower(addr, tx.Nonce())
+			// 减少待处理计数器
+			pendingGauge.Dec(int64(1 + len(invalids)))
+			return 1 + len(invalids)
+		}
+	}
+	// 交易在未来队列中
+	if future := pool.queue[addr]; future != nil {
+		if removed, _ := future.Remove(tx); removed {
+			// 减少排队计数器
+			queuedGauge.Dec(1)
+		}
+		if future.Empty() {
+			delete(pool.queue, addr)
+			delete(pool.beats, addr)
+		}
+	}
+	return 0
+}
+```
 
 
 
