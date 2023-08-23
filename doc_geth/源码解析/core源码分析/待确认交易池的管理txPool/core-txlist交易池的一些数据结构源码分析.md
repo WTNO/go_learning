@@ -748,4 +748,79 @@ func (journal *journal) load(add func([]*types.Transaction) []error) error {
 }
 ```
 
+### insert方法
+调用rlp.Encode写入writer
+```go
+// insert 将指定的交易添加到本地磁盘日志中。
+func (journal *journal) insert(tx *types.Transaction) error {
+	if journal.writer == nil {
+		return errNoActiveJournal // 如果没有活动的日志，则返回错误
+	}
+	if err := rlp.Encode(journal.writer, tx); err != nil {
+		return err // 如果编码交易失败，则返回错误
+	}
+	return nil
+}
+```
+
+### rotate
+基于当前的交易池重新生成交易
+```go
+// rotate 根据当前事务池的内容重新生成事务日志。
+func (journal *journal) rotate(all map[common.Address]types.Transactions) error {
+	// 关闭当前的日志文件（如果有的话）
+	if journal.writer != nil {
+		if err := journal.writer.Close(); err != nil {
+			return err
+		}
+		journal.writer = nil
+	}
+	// 使用当前事务池的内容生成新的日志文件
+	replacement, err := os.OpenFile(journal.path+".new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	journaled := 0
+	for _, txs := range all {
+		for _, tx := range txs {
+			if err = rlp.Encode(replacement, tx); err != nil {
+				replacement.Close()
+				return err
+			}
+		}
+		journaled += len(txs)
+	}
+	replacement.Close()
+
+	// 使用新生成的日志文件替换当前的日志文件
+	if err = os.Rename(journal.path+".new", journal.path); err != nil {
+		return err
+	}
+	sink, err := os.OpenFile(journal.path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	journal.writer = sink
+	log.Info("已重新生成本地事务日志", "事务数", journaled, "账户数", len(all))
+
+	return nil
+}
+```
+
+### close
+```go
+// close将事务日志的内容刷新到磁盘并关闭文件。
+func (journal *journal) close() error {
+	var err error
+
+	if journal.writer != nil {
+		err = journal.writer.Close()
+		journal.writer = nil
+	}
+	return err
+}
+```
+
+
+
 
