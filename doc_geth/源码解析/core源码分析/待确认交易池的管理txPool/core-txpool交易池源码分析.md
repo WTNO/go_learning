@@ -206,13 +206,136 @@ func (pool *LegacyPool) reset(oldHead, newHead *types.Header) {
 ```
 被`LegacyPool`的`Init`方法调用，而在`TxPool`的`New`方法中循环调用了`SubPool`的`Init`方法
 
+### addTxs
+```go
+// addTxs尝试将一批交易加入队列，如果它们是有效的。
+func (pool *LegacyPool) addTxs(txs []*types.Transaction, local, sync bool) []error {
+	// 过滤已知交易，无需获取池锁或恢复签名
+	var (
+		errs = make([]error, len(txs))
+		news = make([]*types.Transaction, 0, len(txs))
+	)
+	for i, tx := range txs {
+		// 如果交易已知，则预设错误槽位
+		if pool.all.Get(tx.Hash()) != nil {
+			errs[i] = ErrAlreadyKnown
+			knownTxMeter.Mark(1)
+			continue
+		}
+		// 在获得锁之前，排除具有基本错误的交易，例如无效签名和不足的内在gas，并在交易中缓存发送者
+		if err := pool.validateTxBasics(tx, local); err != nil {
+			errs[i] = err
+			invalidTxMeter.Mark(1)
+			continue
+		}
+		// 累积所有未知交易以进行更深入的处理
+		news = append(news, tx)
+	}
+	if len(news) == 0 {
+		return errs
+	}
 
+	// 处理所有新交易并将任何错误合并到原始切片中
+	pool.mu.Lock()
+	newErrs, dirtyAddrs := pool.addTxsLocked(news, local)
+	pool.mu.Unlock()
 
+	var nilSlot = 0
+	for _, err := range newErrs {
+		for errs[nilSlot] != nil {
+			nilSlot++
+		}
+		errs[nilSlot] = err
+		nilSlot++
+	}
+	// 如果需要，重新组织池内部并返回
+	done := pool.requestPromoteExecutables(dirtyAddrs)
+	if sync {
+		<-done
+	}
+	return errs
+}
+```
 
+### addTxsLocked
+```go
+// addTxsLocked 尝试将一批事务加入队列，如果它们是有效的。
+// 必须持有事务池锁。
+func (pool *LegacyPool) addTxsLocked(txs []*types.Transaction, local bool) ([]error, *accountSet) {
+	dirty := newAccountSet(pool.signer)
+	errs := make([]error, len(txs))
+	for i, tx := range txs {
+		replaced, err := pool.add(tx, local)
+		errs[i] = err
+		if err == nil && !replaced {
+			dirty.addTx(tx)
+		}
+	}
+	validTxMeter.Mark(int64(len(dirty.accounts)))
+	return errs, dirty
+}
+```
 
+### demoteUnexecutables
+从pending删除无效的或者是已经处理过的交易，其他的不可执行的交易会被移动到future queue中。
+```go
+// demoteUnexecutables函数从池中移除无效和已处理的交易，
+// 可执行/待处理队列以及任何后续变得无法执行的交易将被移回未来队列。
+//
+// 注意：在价格列表中不将交易标记为已移除，因为重新堆化总是由SetBaseFee显式触发的，
+// 在此函数中触发重新堆化是不必要和浪费的。
+func (pool *LegacyPool) demoteUnexecutables() {
+	// 遍历所有帐户并降级任何无法执行的交易
+	gasLimit := pool.currentHead.Load().GasLimit
+	for addr, list := range pool.pending {
+		nonce := pool.currentState.GetNonce(addr)
 
+		// 删除所有被认为过时的交易（低nonce）
+		olds := list.Forward(nonce)
+		for _, tx := range olds {
+			hash := tx.Hash()
+			pool.all.Remove(hash)
+			log.Trace("移除旧的待处理交易", "哈希", hash)
+		}
+		// 删除所有过于昂贵的交易（余额不足或者超出gas限制），并将任何无效的交易重新排队以备后续处理
+		drops, invalids := list.Filter(pool.currentState.GetBalance(addr), gasLimit)
+		for _, tx := range drops {
+			hash := tx.Hash()
+			log.Trace("移除无法支付的待处理交易", "哈希", hash)
+			pool.all.Remove(hash)
+		}
+		pendingNofundsMeter.Mark(int64(len(drops)))
 
+		for _, tx := range invalids {
+			hash := tx.Hash()
+			log.Trace("降级待处理交易", "哈希", hash)
 
+			// 内部洗牌不应触及查找集合。
+			pool.enqueueTx(hash, tx, false, false)
+		}
+		pendingGauge.Dec(int64(len(olds) + len(drops) + len(invalids)))
+		if pool.locals.contains(addr) {
+			localGauge.Dec(int64(len(olds) + len(drops) + len(invalids)))
+		}
+		// 如果前面有间隙，警告（不应该发生），并推迟所有交易
+		if list.Len() > 0 && list.txs.Get(nonce) == nil {
+			gapped := list.Cap(0)
+			for _, tx := range gapped {
+				hash := tx.Hash()
+				log.Error("降级无效的交易", "哈希", hash)
+
+				// 内部洗牌不应触及查找集合。
+				pool.enqueueTx(hash, tx, false, false)
+			}
+			pendingGauge.Dec(int64(len(gapped)))
+		}
+		// 如果待处理列表为空，则删除整个待处理条目。
+		if list.Empty() {
+			delete(pool.pending, addr)
+		}
+	}
+}
+```
 
 
 
