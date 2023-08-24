@@ -544,11 +544,134 @@ func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool) int {
 }
 ```
 
+### loop
+loop是txPool的一个goroutine.也是主要的事件循环.等待和响应外部区块链事件以及各种报告和交易驱逐事件。
+```go
+// loop 是交易池的主要事件循环，等待并响应外部区块链事件以及各种报告和交易清理事件。
+func (p *TxPool) loop(head *types.Header, chain BlockChain) {
+	// 订阅链头事件以触发子池重置
+	var (
+		newHeadCh  = make(chan core.ChainHeadEvent)
+		newHeadSub = chain.SubscribeChainHeadEvent(newHeadCh)
+	)
+	defer newHeadSub.Unsubscribe()
 
+	// 跟踪前一个和当前的链头以提供给空闲重置
+	var (
+		oldHead = head
+		newHead = oldHead
+	)
+	// 消费链头事件并在没有运行的情况下启动重置
+	var (
+		resetBusy = make(chan struct{}, 1) // 允许同时运行一个重置
+		resetDone = make(chan *types.Header)
+	)
+	var errc chan error
+	for errc == nil {
+		// 可能发生了一些有趣的事情，如果有需要但没有正在运行的重置，则运行一个重置。
+		// 重置器将在自己的 goroutine 中运行，以便连续消费链头事件。
+		if newHead != oldHead {
+			// 尝试注入一个忙标记并在成功时启动重置
+			select {
+			case resetBusy <- struct{}{}:
+				// 忙标记已注入，启动新的子池重置
+				go func(oldHead, newHead *types.Header) {
+					for _, subpool := range p.subpools {
+						subpool.Reset(oldHead, newHead)
+					}
+					resetDone <- newHead
+				}(oldHead, newHead)
 
+			default:
+				// 重置已经在运行，等待直到它完成
+			}
+		}
+		// 等待下一个链头事件或前一个重置完成
+		select {
+		case event := <-newHeadCh:
+			// 链前进，存储链头以供稍后使用
+			newHead = event.Block.Header()
 
+		case head := <-resetDone:
+			// 前一个重置完成，更新旧链头并允许新的重置
+			oldHead = head
+			<-resetBusy
 
+		case errc = <-p.quit:
+			// 请求终止，下一轮循环中退出
+		}
+	}
+	// 通知关闭者终止（目前不可能出现错误）
+	errc <- nil
+}
+```
+调用了legacypool中的Reset方法
+```go
+// Reset实现了txpool.SubPool，允许将遗留池的内部状态与主事务池的内部状态保持同步。
+func (pool *LegacyPool) Reset(oldHead, newHead *types.Header) {
+	wait := pool.requestReset(oldHead, newHead)
+	<-wait
+}
 
+// requestReset请求将池重置为新的头块。
+// 当重置完成时，返回的通道将被关闭。
+func (pool *LegacyPool) requestReset(oldHead *types.Header, newHead *types.Header) chan struct{} {
+    select {
+    case pool.reqResetCh <- &txpoolResetRequest{oldHead, newHead}:
+        return <-pool.reorgDoneCh
+    case <-pool.reorgShutdownCh:
+        return pool.reorgShutdownCh
+    }
+}
+```
 
+### Add
+验证交易并将其插入到future queue. 如果这个交易是替换了当前存在的某个交易,那么会返回之前的那个交易,这样外部就不用调用promote方法. 如果某个新增加的交易被标记为local, 那么它的发送账户会进入白名单,这个账户的关联的交易将不会因为价格的限制或者其他的一些限制被删除.
+```go
+// Add将一批交易添加到交易池中，如果它们是有效的。
+// 由于交易频繁变动，add可能会推迟完全将交易整合到稍后的时间点，以批量处理多个交易。
+func (p *TxPool) Add(txs []*Transaction, local bool, sync bool) []error {
+	// 将输入的交易在子池之间进行分割。
+	// 虽然很少发生我们收到合并的批次，但最好处理优雅的情况而不是奇怪的错误。
+	// 我们还需要跟踪交易在子池之间的分割方式，以便可以将返回的错误按照原始顺序拼接回来。
+	txsets := make([][]*Transaction, len(p.subpools))
+	splits := make([]int, len(txs))
+
+	for i, tx := range txs {
+		// 将此交易标记为不属于任何子池
+		splits[i] = -1
+
+		// 尝试找到一个接受该交易的子池
+		for j, subpool := range p.subpools {
+			if subpool.Filter(tx.Tx) {
+				txsets[j] = append(txsets[j], tx)
+				splits[i] = j
+				break
+			}
+		}
+	}
+
+	// 将分割开的交易添加到各个子池，并将错误按照原始排序方式拼接回来。
+	errsets := make([][]error, len(p.subpools))
+	for i := 0; i < len(p.subpools); i++ {
+		errsets[i] = p.subpools[i].Add(txsets[i], local, sync)
+	}
+
+	errs := make([]error, len(txs))
+	for i, split := range splits {
+		// 如果交易被所有子池拒绝，则标记为不支持的类型
+		if split == -1 {
+			errs[i] = core.ErrTxTypeNotSupported
+			continue
+		}
+
+		// 找到处理该交易的子池，并获取相应的错误
+		errs[i] = errsets[split][0]
+		errsets[split] = errsets[split][1:]
+	}
+
+	return errs
+}
+```
 
 
