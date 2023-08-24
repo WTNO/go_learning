@@ -625,53 +625,164 @@ func (pool *LegacyPool) requestReset(oldHead *types.Header, newHead *types.Heade
 }
 ```
 
-### Add
+### add(从`TxPool`移到了`SubPool`接口中，而`LegacyPool`实现了这个接口)
 验证交易并将其插入到future queue. 如果这个交易是替换了当前存在的某个交易,那么会返回之前的那个交易,这样外部就不用调用promote方法. 如果某个新增加的交易被标记为local, 那么它的发送账户会进入白名单,这个账户的关联的交易将不会因为价格的限制或者其他的一些限制被删除.
 ```go
-// Add将一批交易添加到交易池中，如果它们是有效的。
-// 由于交易频繁变动，add可能会推迟完全将交易整合到稍后的时间点，以批量处理多个交易。
-func (p *TxPool) Add(txs []*Transaction, local bool, sync bool) []error {
-	// 将输入的交易在子池之间进行分割。
-	// 虽然很少发生我们收到合并的批次，但最好处理优雅的情况而不是奇怪的错误。
-	// 我们还需要跟踪交易在子池之间的分割方式，以便可以将返回的错误按照原始顺序拼接回来。
-	txsets := make([][]*Transaction, len(p.subpools))
-	splits := make([]int, len(txs))
+// add函数对交易进行验证，并将其插入非可执行队列以供稍后进行挂起推广和执行。
+// 如果该交易替代了已经挂起或排队的交易，并且其价格更高，则覆盖先前的交易。
+//
+// 如果新添加的交易被标记为本地交易，发送账户将被添加到allowlist中，
+// 以防止由于定价限制而将任何相关交易从池中删除。
+func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, err error) {
+	// 如果交易已经存在于已知交易中，则丢弃它
+	hash := tx.Hash()
+	if pool.all.Get(hash) != nil {
+		log.Trace("丢弃已知交易", "hash", hash)
+		knownTxMeter.Mark(1)
+		return false, ErrAlreadyKnown
+	}
+	// 制作本地标志。如果它来自本地源，或者来自网络但发送方先前被标记为本地，则将其视为本地交易。
+	isLocal := local || pool.locals.containsTx(tx)
 
-	for i, tx := range txs {
-		// 将此交易标记为不属于任何子池
-		splits[i] = -1
+	// 如果交易未通过基本验证，则丢弃它
+	if err := pool.validateTx(tx, isLocal); err != nil {
+		log.Trace("丢弃无效交易", "hash", hash, "err", err)
+		invalidTxMeter.Mark(1)
+		return false, err
+	}
 
-		// 尝试找到一个接受该交易的子池
-		for j, subpool := range p.subpools {
-			if subpool.Filter(tx.Tx) {
-				txsets[j] = append(txsets[j], tx)
-				splits[i] = j
-				break
+	// 到此为止已经通过验证
+	from, _ := types.Sender(pool.signer, tx)
+
+	// 如果交易池已满，则丢弃低价交易
+	if uint64(pool.all.Slots()+numSlots(tx)) > pool.config.GlobalSlots+pool.config.GlobalQueue {
+		// 如果新交易价格过低，则不接受它
+		if !isLocal && pool.priced.Underpriced(tx) {
+			log.Trace("丢弃低价交易", "hash", hash, "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
+			underpricedTxMeter.Mark(1)
+			return false, txpool.ErrUnderpriced
+		}
+
+		// 我们将要替换一笔交易。重新组织对要删除和如何删除的更彻底分析，但它是异步执行的。
+		// 我们不希望在重新组织运行之间进行太多替换，因此我们将替换的数量限制为槽位的25％。
+		if pool.changesSinceReorg > int(pool.config.GlobalSlots/4) {
+			throttleTxMeter.Mark(1)
+			return false, ErrTxPoolOverflow
+		}
+
+		// 新交易优于最差的交易，为其腾出空间。
+		// 如果它是本地交易，则强制丢弃所有可用交易。
+		// 否则，如果无法为新交易腾出足够的空间，则中止操作。
+		drop, success := pool.priced.Discard(pool.all.Slots()-int(pool.config.GlobalSlots+pool.config.GlobalQueue)+numSlots(tx), isLocal)
+
+		// 特殊情况，我们仍然无法为新的远程交易腾出空间。
+		if !isLocal && !success {
+			log.Trace("丢弃溢出交易", "hash", hash)
+			overflowedTxMeter.Mark(1)
+			return false, ErrTxPoolOverflow
+		}
+
+		// 如果新交易是未来交易，则不应该替换挂起的交易
+		if !isLocal && pool.isGapped(from, tx) {
+			var replacesPending bool
+			for _, dropTx := range drop {
+				dropSender, _ := types.Sender(pool.signer, dropTx)
+				if list := pool.pending[dropSender]; list != nil && list.Contains(dropTx.Nonce()) {
+					replacesPending = true
+					break
+				}
+			}
+			// 将所有交易重新添加到有价值的队列中
+			if replacesPending {
+				for _, dropTx := range drop {
+					pool.priced.Put(dropTx, false)
+				}
+				log.Trace("丢弃将要替换挂起交易的未来交易", "hash", hash)
+				return false, txpool.ErrFutureReplacePending
 			}
 		}
-	}
 
-	// 将分割开的交易添加到各个子池，并将错误按照原始排序方式拼接回来。
-	errsets := make([][]error, len(p.subpools))
-	for i := 0; i < len(p.subpools); i++ {
-		errsets[i] = p.subpools[i].Add(txsets[i], local, sync)
-	}
-
-	errs := make([]error, len(txs))
-	for i, split := range splits {
-		// 如果交易被所有子池拒绝，则标记为不支持的类型
-		if split == -1 {
-			errs[i] = core.ErrTxTypeNotSupported
-			continue
+		// 将低价远程交易剔除。
+		for _, tx := range drop {
+			log.Trace("丢弃刚刚低价交易", "hash", tx.Hash(), "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
+			underpricedTxMeter.Mark(1)
+			dropped := pool.removeTx(tx.Hash(), false)
+			pool.changesSinceReorg += dropped
 		}
-
-		// 找到处理该交易的子池，并获取相应的错误
-		errs[i] = errsets[split][0]
-		errsets[split] = errsets[split][1:]
 	}
 
-	return errs
+	// 尝试替换挂起池中的现有交易
+	if list := pool.pending[from]; list != nil && list.Contains(tx.Nonce()) {
+		// Nonce已经挂起，检查是否满足所需的价格提升
+		inserted, old := list.Add(tx, pool.config.PriceBump)
+		if !inserted {
+			pendingDiscardMeter.Mark(1)
+			return false, txpool.ErrReplaceUnderpriced
+		}
+		// 新交易更好，替换旧交易
+		if old != nil {
+			pool.all.Remove(old.Hash())
+			pool.priced.Removed(1)
+			pendingReplaceMeter.Mark(1)
+		}
+		pool.all.Add(tx, isLocal)
+		pool.priced.Put(tx, isLocal)
+		pool.journalTx(from, tx)
+		pool.queueTxEvent(tx)
+		log.Trace("已汇集新的可执行交易", "hash", hash, "from", from, "to", tx.To())
+
+		// 成功推广，增加心跳计数
+		pool.beats[from] = time.Now()
+		return old != nil, nil
+	}
+	// 新交易不替换挂起交易，推入队列
+	replaced, err = pool.enqueueTx(hash, tx, isLocal, true)
+	if err != nil {
+		return false, err
+	}
+	// 标记本地地址并记录本地交易
+	if local && !pool.locals.contains(from) {
+		log.Info("设置新的本地账户", "address", from)
+		pool.locals.add(from)
+		pool.priced.Removed(pool.all.RemoteToLocals(pool.locals)) // 如果首次标记为本地，则迁移远程交易。
+	}
+	if isLocal {
+		localGauge.Inc(1)
+	}
+	pool.journalTx(from, tx)
+
+	log.Trace("已汇集新的未来交易", "hash", hash, "from", from, "to", tx.To())
+	return replaced, nil
 }
 ```
 
+### validateTx
+使用一致性规则来检查一个交易是否有效,并采用本地节点的一些启发式的限制.
+```go
+// validateTx 检查交易是否根据共识规则有效，并且符合本地节点的某些启发性限制（价格和大小）。
+func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
+	opts := &txpool.ValidationOptionsWithState{
+		State: pool.currentState,
 
+		FirstNonceGap: nil, // 池允许任意到达顺序，不会使Nonce间隔无效
+		ExistingExpenditure: func(addr common.Address) *big.Int {
+			if list := pool.pending[addr]; list != nil {
+				return list.totalcost
+			}
+			return new(big.Int)
+		},
+		ExistingCost: func(addr common.Address, nonce uint64) *big.Int {
+			if list := pool.pending[addr]; list != nil {
+				if tx := list.txs.Get(nonce); tx != nil {
+					return tx.Cost()
+				}
+			}
+			return nil
+		},
+	}
+	if err := txpool.ValidateTransactionWithState(tx, pool.signer, opts); err != nil {
+		return err
+	}
+	return nil
+}
+```
