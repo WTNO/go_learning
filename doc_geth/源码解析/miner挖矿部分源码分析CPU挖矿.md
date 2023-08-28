@@ -197,15 +197,109 @@ geth --maxpeer 0 --rpc --rpcapi --rpcport 8080 "miner,admin,eth" console
 curl -d '{"id":1,"method": "miner_start", "params": [1]}' http://127.0.0.1:8080
 ```
 
+## 挖矿启动细节
+不管何种方式启动挖矿，最终都是通过调用 miner 对象的 Start 方法来启动挖矿。不过在开启挖矿前，geth 还处理了额外内容。
 
+当你通过控制台或者 RPC API 调用启动挖矿命令后，在程序都将引导到方法`func (s *Ethereum) StartMining(threads int) error `。
+```go
+// StartMining 启动矿工并指定CPU线程数量。
+// 如果矿工已经在运行，此方法会调整允许使用的线程数量，并更新交易池所需的最低价格。
+func (s *Ethereum) StartMining() error {
+	// 如果矿工没有在运行，则进行初始化
+	if !s.IsMining() {
+		// 将初始价格传播到交易池
+		s.lock.RLock()
+		price := s.gasPrice
+		s.lock.RUnlock()
+		s.txPool.SetGasTip(price)
 
+		// 配置本地挖矿地址
+		eb, err := s.Etherbase()
+		if err != nil {
+			log.Error("无法在没有以太坊基地址的情况下开始挖矿", "err", err)
+			return fmt.Errorf("缺少以太坊基地址：%v", err)
+		}
+		var cli *clique.Clique
+		if c, ok := s.engine.(*clique.Clique); ok {
+			cli = c
+		} else if cl, ok := s.engine.(*beacon.Beacon); ok {
+			if c, ok := cl.InnerEngine().(*clique.Clique); ok {
+				cli = c
+			}
+		}
+		if cli != nil {
+			wallet, err := s.accountManager.Find(accounts.Account{Address: eb})
+			if wallet == nil || err != nil {
+				log.Error("本地不存在以太坊基地址账户", "err", err)
+				return fmt.Errorf("缺少签名器：%v", err)
+			}
+			cli.Authorize(eb, wallet.SignData)
+		}
+		// 如果挖矿已经开始，我们可以禁用交易拒绝机制，以加快同步时间。
+		s.handler.acceptTxs.Store(true)
 
+		go s.miner.Start()
+	}
+	return nil
+}
 
+// StopMining终止挖矿操作，包括共识引擎级别和区块创建级别。
+func (s *Ethereum) StopMining() {
+    // 更新共识引擎中的线程数
+    type threaded interface {
+        SetThreads(threads int)
+    }
+    if th, ok := s.engine.(threaded); ok {
+        th.SetThreads(-1)
+    }
+    // 停止区块创建本身
+    s.miner.Stop()
+}
+```
 
+在此方法中，首先看挖矿的共识引擎是否支持设置协程数❶，如果支持，将更新此共识引擎参数 ❷。接着，如果已经是在挖矿中，则忽略启动，否则将开启挖矿 ❸。在启动前，需要确定两项配置：交易GasPrice下限❹，和挖矿奖励接收账户（矿工账户地址）❺。
 
+这里对于 clique.Clique 共识引擎（PoA 权限共识），进行了特殊处理，需要从钱包中查找对于挖矿账户❻。在进行挖矿时不再是进行PoW计算，而是使用认可的账户进行区块签名❼即可。
 
+可能由于一些原因，不允许接收网络交易。因此，在挖矿前将允许接收网络交易❽。随即，开始在挖矿账户下开启挖矿❾。此时，已经进入了miner实例的 Start 方法。
 
+```go
+// miner/miner.go:168
+func (miner *Miner) Start() {
+	miner.startCh <- struct{}{}
+}
 
+// miner/worker.go:356
+// start将运行状态设置为1，并触发新的工作提交。
+func (w *worker) start() {
+    w.running.Store(true)
+    w.startCh <- struct{}{}
+}
+```
+
+存储coinbase 账户后⑩，有可能因为正在同步数据，此时将不允许启动挖矿⑪。如果能够启动挖矿，则立即开启worker 让其开始干活。只需要发送一个开启挖矿信号，worker 将会被自动触发挖矿工作。
+
+## Worker Start 信号
+对 worker 发送 start 信号后，该信号将进入 startCh chain中。一旦获得信号，则立即重新开始commit新区块，重新开始干活。
+```go
+// miner/worker.go:441
+// newWorkLoop是一个独立的goroutine，在接收到事件后提交新的密封工作。
+func (w *worker) newWorkLoop(recommit time.Duration) {
+	...
+
+	for {
+        select {
+        case <-w.startCh:
+            clearPending(w.chain.CurrentBlock().Number.Uint64())
+            timestamp = time.Now().Unix()
+            commit(commitInterruptNewHead)
+        ...
+        }
+	}
+	
+	...
+}
+```
 
 
 
