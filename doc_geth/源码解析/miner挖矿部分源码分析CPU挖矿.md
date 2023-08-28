@@ -74,11 +74,139 @@ newWorkLoop 负责根据不同情况来抉择是否需要终止当前工作，�
 
 在 newWorkLoop 中还有一个辅助信号，resubmitAdjustCh 和 resubmitIntervalCh。运行外部修改timer计时器的时钟。resubmitAdjustCh是根据历史情况重新计算一个合理的间隔时间。而resubmitIntervalCh则允许外部，实时通过 Miner 实例方法 SetRecommitInterval 修改间隔时间。
 
-上面是在控制何时挖矿，而 taskLoop 和resultLoop则不同。 taskLoop 是在监听任务。任务是指包含了新区块内容的任务，表示可以将此新区块进行PoW计算。一旦接受到新任务，则立即将此任务进行PoW工作量计算，寻找符合要求的Nonce。一旦计算完成，把任务和计算结果作为一项结果数据告知 resultLoop 。由resultLoop 完成区块的最后工作，即将计算结构和区块基本数据组合成一个符合共识算法的区块。完成区块最后的数据存储和网络广播。
+上面是在控制何时挖矿，而 `taskLoop` 和 `resultLoop` 则不同。`taskLoop` 是在监听任务。任务是指包含了新区块内容的任务，表示可以将此新区块进行PoW计算。一旦接受到新任务，则立即将此任务进行PoW工作量计算，寻找符合要求的Nonce。一旦计算完成，把任务和计算结果作为一项结果数据告知 `resultLoop` 。由resultLoop 完成区块的最后工作，即将计算结构和区块基本数据组合成一个符合共识算法的区块。完成区块最后的数据存储和网络广播。
 
 同时，在挖矿时将当下的挖矿工作的过程信息记录在 environment 中，打包区块时只需要从当前的environment中获取实时数据，或者快照数据。
 
-采用goroutine下使用 channel 作为信号，以太坊 miner 完成一个激活挖矿到最终挖矿成功的整个逻辑。上面的讲解不涉及细节，只是让大家对挖矿有一个整体了解。为后续的各环节详解做准备。
+采用goroutine下使用 channel 作为信号，以太坊 miner 完成一个激活挖矿到最终挖矿成功的整个逻辑。上面的讲解不涉及细节，只是让大家对挖矿有一个整体了解。为后续的各环节详解做准备。                   
+
+# 3. 启动挖矿
+挖矿模块只通过 Miner 实例对外提供数据访问。可以通过多种途径开启挖矿服务。程序运行时已经将 Miner 实例化，并进入等待挖矿状态，随时可以启动挖矿。
+
+## 挖矿参数
+矿工可以根据矿机的服务器性能，来定制化挖矿参数。下面是一份 geth 关于挖矿的运行时参数清单，全部定义在 `cmd/utils/flags.go` 文件中。
+
+| 参数              | 默认值         | 用途  |
+| ----------------- | -------------- | -------------------- |
+| --mine            | false          | 是否自动开启挖矿        |
+| --miner.threads   | 0              | 挖矿时可用并行PoW计算的协程（轻量级线程）数。<br>兼容过时参数 —minerthreads。 |
+| --miner.notify    | 空             | 挖出新块时用于通知远程服务的任意数量的远程服务地址。<br>是用 `,`分割的多个远程服务器地址。<br>如：”http://api.miner.com,http://api2.miner.com“ |
+| --miner.noverify  | false          | 是否禁用区块的PoW工作量校验。   |
+| --miner.gasprice  | 1000000000 wei | 矿工可接受的交易Gas价格，<br>低于此GasPrice的交易将被拒绝写入交易池和不会被矿工打包到区块。 |
+| --miner.gastarget | 8000000 gas    | 动态计算新区块燃料上限（gaslimit）的下限值。<br>兼容过时参数 —targetgaslimit。 |
+| --miner.gaslimit  | 8000000 gas    | 动态技术新区块燃料上限的上限值。    |
+| --miner.etherbase | 第一个账户     | 用于接收挖矿奖励的账户地址，<br>默认是本地钱包中的第一个账户地址。 |
+| --miner.extradata | geth版本号     | 允许矿工自定义写入区块头的额外数据。  |
+| --miner.recommit  | 3s             | 重新开始挖掘新区块的时间间隔。<br>将自动放弃进行中的挖矿后，重新开始一次新区块挖矿。 |
+| --minerthreads    |                | *已过时*   |
+| —targetgaslimit   |                | *已过时*    |
+| --gasprice        |                | *已过时*    |
+
+可以通过执行程序 `geth` 来查看参数。
+
+    geth -h |grep "mine"
+
+## 实例化Miner
+geth 程序运行时已经将 Miner 实例化，只需等待命令开启挖矿。
+```go
+// eth/backend.go:233
+func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+    ...
+    
+    eth.miner = miner.New(eth, &config.Miner, eth.blockchain.Config(), eth.EventMux(), eth.engine, eth.isLocalBlock)
+    eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
+	
+    ...
+}
+```
+
+从上可看出，在实例化 miner 时所用到的配置项只有4项。实例化后，便可通过 API 操作 Miner。
+
+Miner API 分 public 和 private。挖矿属于隐私，不得让其他人任意修改。因此挖矿API全部定义在 Private 中，公共部分只有 Mining()。
+
+## 启动挖矿
+geth 运行时默认不开启挖矿。如果用户需要启动挖矿，则可以通过以下几种方式启动挖矿。
+
+### 参数方式自动开启挖矿
+使用参数 —mine，可以在启动程序时默认开启挖矿。下面我们用 geth 在开发者模式启动挖矿为例：
+
+    geth --dev --mine
+
+启动后，可以看到默认情况下已开启挖矿。开发者模式下已经挖出了一个高度为1的空块。
+
+当参数加入了 `--mine` 参数表示启用挖矿，此时将根据输入个各项挖矿相关的参数启动挖矿服务。
+```go
+// cmd/geth/main.go:410
+// startNode函数启动系统节点和所有注册的协议，之后解锁任何请求的账户，并启动RPC/IPC接口和矿工。
+func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isConsole bool) {
+	...
+
+	// 如果启用了辅助服务，则开始运行 
+    if ctx.Bool(utils.MiningEnabledFlag.Name) || ctx.Bool(utils.DeveloperFlag.Name) {
+        // 只有在运行完整的以太坊节点时，挖矿才有意义
+        if ctx.String(utils.SyncModeFlag.Name) == "light" {
+            utils.Fatalf("轻客户端不支持挖矿")
+        }
+        ethBackend, ok := backend.(*eth.EthAPIBackend)
+        if !ok {
+            utils.Fatalf("以太坊服务未运行")
+        }
+        // 将燃气价格设置为命令行界面上的限制，并开始挖矿
+        gasprice := flags.GlobalBig(ctx, utils.MinerGasPriceFlag.Name)
+        ethBackend.TxPool().SetGasTip(gasprice)
+        if err := ethBackend.StartMining(); err != nil {
+            utils.Fatalf("无法启动挖矿：%v", err)
+        }
+    }
+	
+	...
+}
+```
+
+启动 geth 过程是，如果启用挖矿`--mine`或者属于开发者模式`—dev`，则将启动挖矿。
+
+在启动挖矿之前，还需要获取 `—miner.gasprice` 实时应用到交易池中。同时也需要指定将允许使用多少协程来并行参与PoW计算。然后开启挖矿，如果开启挖矿失败则终止程序运行并打印错误信息。
+
+### 控制台命令启动挖矿
+在实例化Miner后，已经将 miner 的操作API化。因此我们可以在 geth 的控制台中输入Start命令启动挖矿。
+
+调用API `miner_start` 将使用给定的挖矿计算线程数来开启挖矿。下面表格是调用 API 的几种方式。
+
+| 客户端  | 调用方式                                            |
+| ------- | --------------------------------------------------- |
+| Go      | `miner.Start(threads *rpc.HexNumber) (bool, error)` |
+| Console | `miner.start(number)`                               |
+| RPC     | `{"method": "miner_start", "params": [number]}`     |
+
+首先，我们进入 geth 的 JavaScript 控制台，后输入命令miner.start(1)来启动挖矿。
+
+    geth --maxpeers=0 console
+
+启动挖矿后，将开始出新区块。
+
+### RPC API 启动挖矿
+因为 API 已支持开启挖矿，如上文所述，可以直接调用 RPC  `{"method": "miner_start", "params": [number]}` 来启动挖矿。实际上在控制台所执行的 `miner.start(1)`，则相对于 `{"method": "miner_start", "params": [1]}`。
+
+如，启动 geth 时开启RPC。
+```sh
+geth --maxpeer 0 --rpc --rpcapi --rpcport 8080 "miner,admin,eth" console
+```
+
+开启后，则可以直接调用API，开启挖矿服务。
+```shell
+curl -d '{"id":1,"method": "miner_start", "params": [1]}' http://127.0.0.1:8080
+```
+
+
+
+
+
+
+
+
+
+
+
 
 
 
