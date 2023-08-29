@@ -206,15 +206,15 @@ curl -d '{"id":1,"method": "miner_start", "params": [1]}' http://127.0.0.1:8080
 // 如果矿工已经在运行，此方法会调整允许使用的线程数量，并更新交易池所需的最低价格。
 func (s *Ethereum) StartMining() error {
 	// 如果矿工没有在运行，则进行初始化
-	if !s.IsMining() {
+	if !s.IsMining() { //❸
 		// 将初始价格传播到交易池
 		s.lock.RLock()
 		price := s.gasPrice
 		s.lock.RUnlock()
-		s.txPool.SetGasTip(price)
+		s.txPool.SetGasTip(price) //❹
 
 		// 配置本地挖矿地址
-		eb, err := s.Etherbase()
+		eb, err := s.Etherbase() //❺
 		if err != nil {
 			log.Error("无法在没有以太坊基地址的情况下开始挖矿", "err", err)
 			return fmt.Errorf("缺少以太坊基地址：%v", err)
@@ -228,17 +228,17 @@ func (s *Ethereum) StartMining() error {
 			}
 		}
 		if cli != nil {
-			wallet, err := s.accountManager.Find(accounts.Account{Address: eb})
+			wallet, err := s.accountManager.Find(accounts.Account{Address: eb}) //❻
 			if wallet == nil || err != nil {
 				log.Error("本地不存在以太坊基地址账户", "err", err)
 				return fmt.Errorf("缺少签名器：%v", err)
 			}
-			cli.Authorize(eb, wallet.SignData)
+			cli.Authorize(eb, wallet.SignData) //❼
 		}
 		// 如果挖矿已经开始，我们可以禁用交易拒绝机制，以加快同步时间。
-		s.handler.acceptTxs.Store(true)
+		s.handler.acceptTxs.Store(true) //❽
 
-		go s.miner.Start()
+		go s.miner.Start() //❾
 	}
 	return nil
 }
@@ -249,13 +249,15 @@ func (s *Ethereum) StopMining() {
     type threaded interface {
         SetThreads(threads int)
     }
-    if th, ok := s.engine.(threaded); ok {
-        th.SetThreads(-1)
+    if th, ok := s.engine.(threaded); ok { //❶
+        th.SetThreads(-1) //❷
     }
     // 停止区块创建本身
     s.miner.Stop()
 }
 ```
+
+> 代码发生了一些变化，`StartMining` 少了❶❷中的代码
 
 在此方法中，首先看挖矿的共识引擎是否支持设置协程数❶，如果支持，将更新此共识引擎参数 ❷。接着，如果已经是在挖矿中，则忽略启动，否则将开启挖矿 ❸。在启动前，需要确定两项配置：交易GasPrice下限❹，和挖矿奖励接收账户（矿工账户地址）❺。
 
@@ -269,6 +271,90 @@ func (miner *Miner) Start() {
 	miner.startCh <- struct{}{}
 }
 
+func New(eth Backend, config *Config, chainConfig *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, isLocalBlock func(header *types.Header) bool) *Miner {
+    miner := &Miner{
+        mux:     mux,
+        eth:     eth,
+        engine:  engine,
+        exitCh:  make(chan struct{}),
+        startCh: make(chan struct{}),
+        stopCh:  make(chan struct{}),
+        worker:  newWorker(config, chainConfig, engine, eth, mux, isLocalBlock, true),
+    }
+    miner.wg.Add(1)
+    go miner.update()
+    return miner
+}
+
+// update函数用于跟踪下载器事件。请注意，这是一种一次性的更新循环。
+// 它只会进入一次，一旦`Done`或`Failed`被广播，事件将被取消注册并退出循环。
+// 这是为了防止外部方通过块进行DOS攻击，并在DOS攻击持续期间停止您的挖矿操作，从而造成重大安全漏洞。
+func (miner *Miner) update() {
+	defer miner.wg.Done()
+
+	// 订阅下载器的StartEvent、DoneEvent和FailedEvent事件
+	events := miner.mux.Subscribe(downloader.StartEvent{}, downloader.DoneEvent{}, downloader.FailedEvent{})
+	defer func() {
+		if !events.Closed() {
+			events.Unsubscribe()
+		}
+	}()
+
+	shouldStart := false
+	canStart := true
+	dlEventCh := events.Chan()
+	for {
+		select {
+		case ev := <-dlEventCh:
+			if ev == nil {
+				// 取消订阅完成，停止监听
+				dlEventCh = nil
+				continue
+			}
+			switch ev.Data.(type) {
+			case downloader.StartEvent:
+				wasMining := miner.Mining()
+				miner.worker.stop()
+				canStart = false
+				if wasMining {
+					// 同步完成后恢复挖矿
+					shouldStart = true
+					log.Info("由于同步而中止挖矿")
+				}
+				miner.worker.syncing.Store(true)
+
+			case downloader.FailedEvent:
+				canStart = true
+				if shouldStart {
+					miner.worker.start()
+				}
+				miner.worker.syncing.Store(false)
+
+			case downloader.DoneEvent:
+				canStart = true
+				if shouldStart {
+					miner.worker.start()
+				}
+				miner.worker.syncing.Store(false)
+
+				// 停止对下载器事件的响应
+				events.Unsubscribe()
+			}
+		case <-miner.startCh:
+			if canStart {
+				miner.worker.start()
+			}
+			shouldStart = true
+		case <-miner.stopCh:
+			shouldStart = false
+			miner.worker.stop()
+		case <-miner.exitCh:
+			miner.worker.close()
+			return
+		}
+	}
+}
+
 // miner/worker.go:356
 // start将运行状态设置为1，并触发新的工作提交。
 func (w *worker) start() {
@@ -276,6 +362,8 @@ func (w *worker) start() {
     w.startCh <- struct{}{}
 }
 ```
+
+> miner的构造方法中会调用update方法，`update`中会一直监听各种`miner`信号
 
 存储coinbase 账户后⑩，有可能因为正在同步数据，此时将不允许启动挖矿⑪。如果能够启动挖矿，则立即开启worker 让其开始干活。只需要发送一个开启挖矿信号，worker 将会被自动触发挖矿工作。
 
