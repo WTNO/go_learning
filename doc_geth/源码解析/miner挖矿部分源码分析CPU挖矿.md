@@ -568,7 +568,79 @@ case adjust := <-w.resubmitAdjustCh:
 	}
 ```
 
+重新计算计时器时间间隔后，将会下一个计时器上生效。
 
+同时，还支持矿工通过调用RPC API `{"method": "miner_setRecommitInterval", "params": [interval]}` 来直接修改计时器间隔。调用API后，将会在 worker 中产生信号。
+```go
+// miner/worker.go:244
+// setRecommitInterval函数用于更新矿工封存工作重新提交的间隔。
+func (w *worker) setRecommitInterval(interval time.Duration) {
+	select {
+	case w.resubmitIntervalCh <- interval:
+	case <-w.exitCh:
+	}
+}
+```
+
+而在 newWorkLoop 监控中，将监控该信号。发现信号后，立即重置计时器的时间间隔。
+```go
+case interval := <-w.resubmitIntervalCh:
+	// 显式地根据用户调整重新提交间隔。
+	if interval < minRecommitInterval {
+		log.Warn("清理矿工重新提交间隔", "提供的间隔", interval, "更新后的间隔", minRecommitInterval)
+		interval = minRecommitInterval
+	}
+	log.Info("矿工重新提交间隔更新", "从", minRecommit, "到", interval)
+	minRecommit, recommit = interval, interval
+	
+	if w.resubmitHook != nil {
+		w.resubmitHook(minRecommit, recommit)
+	}
+```
+
+# 以太坊挖矿逻辑流程
+上一篇文章中，有介绍是如何发出挖矿工作信号的。当有了挖矿信号后，就可以开始挖矿了。
+
+先回头看看，在讲解挖矿的第一篇文章中，有讲到挖矿流程。这篇文章将讲解挖矿中的各个环节。
+
+<img src="../img/以太坊挖矿逻辑流程1.webp">
+
+## 挖矿代码方法介绍
+在继续了解挖矿过程之前，先了解几个miner方法的作用。
+
+- commitTransactions：提交交易到当前挖矿的上下文环境(environment)中。上下文环境中记录了当前挖矿工作信息，如当前挖矿高度、已提交的交易、当前State等信息。
+- updateSnapshot：更新 environment 快照。快照中记录了区块内容和区块StateDB信息。相对于把当前 environment 备份到内存中。这个备份对挖矿没什么用途，只是方便外部查看 PendingBlock。
+- commitNewWork：重新开始下一个区块的挖矿的第一个环节“构建新区块”。这个是整个挖矿业务处理的一个核心，值得关注。
+- commit： 提交新区块工作，发送 PoW 计算信号。这将触发竞争激烈的 PoW 寻找Nonce过程。
+
+## 挖矿工作管理
+什么时候可以进行挖矿？如下图所述，挖矿启动工作时由 mainLoop 中根据三个信号来管理。首先是新工作启动信号(newWorkCh)、再是根据新交易信号(txsCh)和最长链链切换信号(chainSideCh)来管理挖矿。
+
+<img src="../img/以太坊挖矿逻辑流程2.webp">
+
+三种信号，三种管理方式。
+
+## 新工作启动信号
+这个信号，意思非常明确。一旦收到信号，立即开始挖矿。
+```go
+// miner/worker.go:514 (mainLoop)
+case req := <-w.newWorkCh:
+	w.commitWork(req.interrupt, req.timestamp)
+```
+这个信号的来源，已经在上一篇文章 挖矿工作信号监控中讲解。信号中的各项信息也来源与外部，这里仅仅是忠实地传递意图。
+
+## 新交易信号
+在交易池文章中有讲到，交易池在将交易推入交易池后，将向事件订阅者发送 NewTxsEvent。在 miner 中也订阅了此事件。
+```go
+// miner/worker.go/newWorker()
+// Subscribe NewTxsEvent for tx pool
+worker.txsSub = eth.TxPool().SubscribeNewTxsEvent(worker.txsCh)
+```
+
+当接收到新交易信号时，将根据挖矿状态区别对待。当尚未挖矿(!w.isRunning())，但可以挖矿w.current != nil时❶，将会把交易提交到待处理中。
+```go
+
+```
 
 
 
