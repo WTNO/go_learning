@@ -620,7 +620,7 @@ case interval := <-w.resubmitIntervalCh:
 
 三种信号，三种管理方式。
 
-## 新工作启动信号
+### 新工作启动信号
 这个信号，意思非常明确。一旦收到信号，立即开始挖矿。
 ```go
 // miner/worker.go:514 (mainLoop)
@@ -629,7 +629,7 @@ case req := <-w.newWorkCh:
 ```
 这个信号的来源，已经在上一篇文章 挖矿工作信号监控中讲解。信号中的各项信息也来源与外部，这里仅仅是忠实地传递意图。
 
-## 新交易信号
+### 新交易信号
 在交易池文章中有讲到，交易池在将交易推入交易池后，将向事件订阅者发送 NewTxsEvent。在 miner 中也订阅了此事件。
 ```go
 // miner/worker.go/newWorker()
@@ -637,26 +637,131 @@ case req := <-w.newWorkCh:
 worker.txsSub = eth.TxPool().SubscribeNewTxsEvent(worker.txsCh)
 ```
 
-当接收到新交易信号时，将根据挖矿状态区别对待。当尚未挖矿(!w.isRunning())，但可以挖矿w.current != nil时❶，将会把交易提交到待处理中。
+当接收到新交易信号时，将根据挖矿状态区别对待。当尚未挖矿(`!w.isRunning()`)，但可以挖矿`w.current != nil`时❶，将会把交易提交到待处理中。
 ```go
-
+// miner/worker.go/mainLoop
+case ev := <-w.txsCh:
+	// 如果我们没有在封装区块，将交易应用于待处理状态
+	//
+	// 注意，接收到的所有交易可能与当前封装区块中已包含的交易不连续。这些交易将被自动消除。
+	if !w.isRunning() && w.current != nil { //❶
+		// 如果区块已满，则中止
+		if gp := w.current.gasPool; gp != nil && gp.Gas() < params.TxGas {
+			continue
+		}
+		txs := make(map[common.Address][]*types.Transaction, len(ev.Txs))
+		for _, tx := range ev.Txs { //❷
+			acc, _ := types.Sender(w.current.signer, tx)
+			txs[acc] = append(txs[acc], tx)
+		}
+		txset := types.NewTransactionsByPriceAndNonce(w.current.signer, txs, w.current.header.BaseFee) //❸
+		tcount := w.current.tcount
+		w.commitTransactions(w.current, txset, nil) //❹
+		// 只有在添加了任何新交易到待处理区块时才更新快照
+		if tcount != w.current.tcount {
+			w.updateSnapshot(w.current) //❺
+		}
+	} else {
+		// 特殊情况，如果共识引擎是0周期的clique（开发模式），
+		// 在这里提交封装工作，因为所有空提交将被clique拒绝。
+		// 当然，禁用了提前封装（空提交）。
+		if w.chainConfig.Clique != nil && w.chainConfig.Clique.Period == 0 { //❻
+			w.commitWork(nil, time.Now().Unix())
+		}
+	}
+	w.newTxs.Add(int32(len(ev.Txs))) //❼
 ```
 
+首先，将新交易按发送者分组❷后，根据交易价格和Nonce值排序❸。形成一个有序的交易集后，依次提交每笔交易❹。最新完毕后将最新的执行结果进行快照备份❺。当正处于 PoA挖矿，右允许无间隔出块时❻，则将放弃当前工作，重新开始挖矿。
 
+最后，不管何种情况都对新交易数计加❼。但实际并未使用到数据量，仅仅是充当是否有进行中交易的一个标记。
 
+总得来说，新交易信息并不会干扰挖矿。而仅仅是继续使用当前的挖矿上下文，提交交易。也不用考虑交易是否已处理， 因为当交易重复时，第二次提交将会失败。
 
+### ~~最长链链切换信号~~
+~~当一个区块落地成功后，有可能是在另一个分支上。当此分支的挖矿难度大于当前分支时，将发生最长链切换。此时 miner 将需要订阅从信号，以便更新叔块信息。~~
 
+> 当前版本代码中没找到对应部分
 
+## 挖矿流程环节
+当开始新区块挖矿时，第一步就是构建区块，打包出包含交易的区块。在打包区块中，是按逻辑顺序依次组装各项信息。如果你对区块内容不清楚，请先查阅文章区块结构。
 
+### 设置新区块基本信息
+挖矿是在竞争挖下一个区块，需要把最新高度的区块作为父块来确定新区块的基本信息❶。
+```go
+// prepareWork 根据给定的参数构建密封任务，可以基于上一个区块头或指定的父区块头。
+// 在这个函数中，尚未填充待处理的交易，只返回空的任务。
+func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 
+	// 查找密封任务的父区块
+	parent := w.chain.CurrentBlock() //❶
+	if genParams.parentHash != (common.Hash{}) {
+		block := w.chain.GetBlockByHash(genParams.parentHash)
+		if block == nil {
+			return nil, fmt.Errorf("缺少父区块")
+		}
+		parent = block.Header()
+	}
+	// 检查时间戳的正确性，并根据需要调整时间戳
+	timestamp := genParams.timestamp
+	if parent.Time >= timestamp { //❷
+		if genParams.forceTime {
+			return nil, fmt.Errorf("无效的时间戳，父区块时间：%d，给定时间：%d", parent.Time, timestamp)
+		}
+		timestamp = parent.Time + 1
+	}
+	// 构建密封区块的区块头
+	header := &types.Header{ //❹
+		ParentHash: parent.Hash(),
+		Number:     new(big.Int).Add(parent.Number, common.Big1),
+		GasLimit:   core.CalcGasLimit(parent.GasLimit, w.config.GasCeil),
+		Time:       timestamp,
+		Coinbase:   genParams.coinbase,
+	}
+	// 设置额外字段
+	if len(w.extra) != 0 {
+		header.Extra = w.extra
+	}
+	// 如果可用，从 Beacon 链中设置随机字段
+	if genParams.random != (common.Hash{}) {
+		header.MixDigest = genParams.random
+	}
+	// 如果在 EIP-1559 链上，设置 baseFee 和 GasLimit
+	if w.chainConfig.IsLondon(header.Number) {
+		header.BaseFee = misc.CalcBaseFee(w.chainConfig, parent)
+		if !w.chainConfig.IsLondon(parent.Number) {
+			parentGasLimit := parent.GasLimit * w.chainConfig.ElasticityMultiplier()
+			header.GasLimit = core.CalcGasLimit(parentGasLimit, w.config.GasCeil)
+		}
+	}
+	// 使用默认或自定义的共识引擎运行共识准备
+	if err := w.engine.Prepare(w.chain, header); err != nil { //❻
+		log.Error("准备密封区块头失败", "错误", err)
+		return nil, err
+	}
+	// 如果在奇怪的状态下开始挖矿，可能会发生
+	// 注意 genParams.coinbase 可能与 header.Coinbase 不同，
+	// 因为 clique 算法可以修改 header 中的 coinbase 字段。
+	env, err := w.makeEnv(parent, header, genParams.coinbase)
+	if err != nil {
+		log.Error("创建密封上下文失败", "错误", err)
+		return nil, err
+	}
+	return env, nil
+}
+```
 
+先根据父块时间戳调整新区块的时间戳。如果新区块时间戳还小于父块时间戳，则直接在父块时间戳上加一秒。一种情是，新区块链时间戳比当前节点时间还快时，则需要稍做休眠❸，避免新出块属于未来。这也是区块时间戳可以作为区块链时间服务的一种保证。
 
+有了父块，新块的基本信息是确认的。分别是父块哈希、新块高度、燃料上限、挖矿自定义数据、区块时间戳❹。
 
+为了接受区块奖励，还需要设置一个不为空的矿工账户 Coinbase ❺。一个区块的挖矿难度是根据父块动态调整的，因此在正式处理交易前，需要根据共识算法设置新区块的挖矿难度❻。
 
+至此，区块头信息准备就绪。
 
-
-
-
+> ❸❺处对应的代码没找到，已经改写逻辑？
 
 
 
