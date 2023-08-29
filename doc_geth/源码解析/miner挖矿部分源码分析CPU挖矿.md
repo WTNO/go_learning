@@ -389,22 +389,61 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 }
 ```
 
+# 4. 以太坊挖矿信号监控
+挖矿的核心集中在 worker 中。worker 采用Go语言内置的 chain 跨进程通信方式。在不同工作中，根据信号处理不同工作。
 
+下图是实例化 worker 时启动的四个循环，分别监听不同信号来处理不同任务。
+- mainLoop
+- taskLoop
+- resultLoop
+- newWorkLoop
 
+<img src="../img/以太坊挖矿信号监控1.webp">
 
+## 4.1 挖矿工作信号
+首先是在 `newWorkLoop` 中监控新挖矿任务。分别监控了三种信号，不管接收到三种中的哪种信号都会触发新一轮挖矿。
 
+但根据信号类型，会告知内部需要重新开启挖矿的原因。如果已经在挖矿中，那么在开启新一轮挖矿前，会将旧工作终止。
 
+如上图，当前的信号类型有：
+1. start 信号：
+   
+start信号属于开启挖矿的信号。在上一篇启动挖矿中，已经有简单介绍。每次在 miner.Start() 时将会触发新挖矿任务。
+```go
+case <-w.startCh:
+    clearPending(w.chain.CurrentBlock().Number.Uint64())
+    timestamp = time.Now().Unix()
+    commit(commitInterruptNewHead)
+```
 
+2. chainHead信号：
 
+节点接收到了新的区块。比如，你原本是是在下一个新区块上挖矿，区块高度是 1000。此时你从网络上收到了一个合法的区块，高度也一样。这样，你就不需要再花力气和别人竞争了，赶快投入到下一个区块的挖矿竞争，才是有意义的。
+```go
+case head := <-w.chainHeadCh:
+    clearPending(head.Block.NumberU64())
+    timestamp = time.Now().Unix()
+    commit(commitInterruptNewHead)
+```
 
+3. timer 信号：
 
+一个时间timer，默认每三秒检查执行一次检查。如果当下正在挖矿中，那么需要检查是否有新交易。如果有新交易，则需要放弃当前交易处理，重新开始一轮挖矿。这样可以使得愿意支付更多手续费的交易能被优先处理。
+```go
+case <-timer.C:
+	// 如果封存正在运行，请定期重新提交新的工作周期以吸引更高价值的交易。
+	// 对于待处理的区块，禁用此开销。
+	if w.isRunning() && (w.chainConfig.Clique == nil || w.chainConfig.Clique.Period > 0) {
+		// 如果没有新的交易到达，则进行短路处理。
+		if w.newTxs.Load() == 0 {
+			timer.Reset(recommit)
+			continue
+		}
+		commit(commitInterruptResubmit)
+	}
+```
 
-
-
-
-
-
-
+这三类信号最终都聚集在新一轮挖矿上。那么是如何处理的呢？上图中，挖矿工作在 `mainLoop` 监控中一直等待 newWork信号。此处的三个工作信息，都通过 commit 方法，发送 newWork 信号。
 
 
 
