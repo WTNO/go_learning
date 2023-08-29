@@ -410,6 +410,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
    
 start信号属于开启挖矿的信号。在上一篇启动挖矿中，已经有简单介绍。每次在 miner.Start() 时将会触发新挖矿任务。
 ```go
+// newWorkLoop
 case <-w.startCh:
     clearPending(w.chain.CurrentBlock().Number.Uint64())
     timestamp = time.Now().Unix()
@@ -420,6 +421,7 @@ case <-w.startCh:
 
 节点接收到了新的区块。比如，你原本是是在下一个新区块上挖矿，区块高度是 1000。此时你从网络上收到了一个合法的区块，高度也一样。这样，你就不需要再花力气和别人竞争了，赶快投入到下一个区块的挖矿竞争，才是有意义的。
 ```go
+// newWorkLoop
 case head := <-w.chainHeadCh:
     clearPending(head.Block.NumberU64())
     timestamp = time.Now().Unix()
@@ -430,6 +432,7 @@ case head := <-w.chainHeadCh:
 
 一个时间timer，默认每三秒检查执行一次检查。如果当下正在挖矿中，那么需要检查是否有新交易。如果有新交易，则需要放弃当前交易处理，重新开始一轮挖矿。这样可以使得愿意支付更多手续费的交易能被优先处理。
 ```go
+// newWorkLoop
 case <-timer.C:
 	// 如果封存正在运行，请定期重新提交新的工作周期以吸引更高价值的交易。
 	// 对于待处理的区块，禁用此开销。
@@ -444,19 +447,126 @@ case <-timer.C:
 ```
 
 这三类信号最终都聚集在新一轮挖矿上。那么是如何处理的呢？上图中，挖矿工作在 `mainLoop` 监控中一直等待 newWork信号。此处的三个工作信息，都通过 commit 方法，发送 newWork 信号。
+```go
+// newWorkLoop
+// commit函数中断正在执行的事务并提交一个新的事务。
+commit := func(s int32) {
+	if interrupt != nil {
+		interrupt.Store(s)
+	}
+	interrupt = new(atomic.Int32)
+	select {
+	case w.newWorkCh <- &newWorkReq{interrupt: interrupt, timestamp: timestamp}:
+	case <-w.exitCh:
+		return
+	}
+	timer.Reset(recommit)
+	w.newTxs.Store(0)
+}
+```
 
+newWork 信号数据中有两个字段（少了noempty）：
+1. interrupt：这是一个数字指针，也就不管新work信号还是旧work信号，都能一直跟踪相同的一个全局唯一的任务终止信号值interrupt。 如果是需要终止旧任务，只需要更新信号值atomic.StoreInt32(interrupt, s)后，work 内部便会感知到，从而终止挖矿工作。
+2. ~~noempty：是否不能为空块。默认情况下是允许挖空块的，但是明知有交易需要处理，则不允许挖空块（见 timer信号）。~~
+3. timestamp：记录的是当前操作系统时间，最终会被用作区块的区块时间戳。
 
+## 动态估算交易处理时长
+再回到 timer 信号上。geth 程序启动时，timmer 计时器默认是三秒。但这个时间间隔不是一成不变的，会根据挖矿时长来动态调整。
 
+为什么是默认值是三秒呢？也就是说，系统默认有三秒时间来处理交易，一笔转账交易执行时间是毫秒级的。如果三秒后，仍有新交易未处理完毕，则需要重来，将根据新的交易排序，将愿意支付更多手续费的交易优先处理。
 
+在挖矿timer计时器中，不能固定为三秒钟，这样时间可能太短。采用动态估算的方式也许更加有效。 动态估算的计算公式分两部分：先是计算出一个比例ratio=燃料剩余率，再加工计算出一个新的计时器时间。
+```
+新时间间隔 = 当前时间间隔 * (1-基准增长率) + 基准增长率 * ( 当前时间间隔/燃料剩余率 )
+	        = 当前时间间隔 * (1-0.1) + 0.1 * ( 当前时间间隔/燃料剩余率 )
+```
 
+这里的基准增长率是一个常量 0.1 ，通过公式可以看出，是否能有10%的时间延长，取决于燃料剩余率。剩余燃料越多，增长越小，最低是接近90%的负值长。剩余燃料越少，增长越快，最大有近60%的增长。当然也不能一直增长下去，这里有一个15秒的上限值。
 
+动态估算是发生在本次处理到期后，根据一定策略估算出一个新计时器。当正在处理一笔交易时，将检查终止信息值interrupt，如果刚好遇上时间到期，则需要调整计时器❶。以太坊是根据燃料实际执行情况来参与动态估算。首先计算直接等于剩余燃料在区块总燃料中的占比❷。这种计算方式完全是根据单个gas的基础用时，来推导剩余gas可以处理多长时间的交易。
 
+> 这里逻辑发生了变化
 
+```go
+// commitWork函数基于父块生成了多个新的封装任务，并将它们提交给封装器。
+func (w *worker) commitWork(interrupt *atomic.Int32, timestamp int64) {
+	// 如果节点仍在同步中，则终止提交
+	if w.syncing.Load() {
+		return
+	}
+	start := time.Now()
 
+	// 如果工作线程正在运行或需要coinbase，则设置coinbase
+	var coinbase common.Address
+	if w.isRunning() {
+		coinbase = w.etherbase()
+		if coinbase == (common.Address{}) {
+			log.Error("没有etherbase，拒绝挖矿")
+			return
+		}
+	}
+	work, err := w.prepareWork(&generateParams{
+		timestamp: uint64(timestamp),
+		coinbase:  coinbase,
+	})
+	if err != nil {
+		return
+	}
+	// 从交易池中将待处理交易填充到块中
+	err = w.fillTransactions(interrupt, work)
+	switch {
+	case err == nil:
+		// 整个块已填满，在当前间隔大于用户指定间隔的情况下，减少重新提交间隔。
+		w.resubmitAdjustCh <- &intervalAdjust{inc: false}
 
+	case errors.Is(err, errBlockInterruptedByRecommit):
+		// 如果中断是由于频繁提交而导致的，则通知重新提交循环增加重新提交间隔。
+		gaslimit := work.header.GasLimit
+		ratio := float64(gaslimit-work.gasPool.Gas()) / float64(gaslimit) //❷
+		if ratio < 0.1 {
+			ratio = 0.1
+		}
+		w.resubmitAdjustCh <- &intervalAdjust{ //❸
+			ratio: ratio,
+			inc:   true,
+		}
 
+	case errors.Is(err, errBlockInterruptedByNewHead):
+		// 如果块构建被newhead事件中断，则完全丢弃它。提交中断的块会引入不必要的延迟，
+		// 并可能导致矿工在前一个块上进行挖矿，从而导致更高的叔块率。
+		work.discard()
+		return
+	}
+	// 提交生成的块进行共识封装。
+	w.commit(work.copy(), w.fullTaskHook, true, start)
 
+	// 用新的工作替换旧的工作，同时终止任何剩余的预取进程并启动一个新的进程。
+	if w.current != nil {
+		w.current.discard()
+	}
+	w.current = work
+}
+```
 
+在计算出时间增长率后，发送一个自动更新计时器时间的信号 resubmitAdjust。要求按剩余率调整计时器❸。在接收到信号后❹，根据剩余率重新计算计时器时间❺。
+```go
+// miner/worker.go:476 (newWorkLoop)
+case adjust := <-w.resubmitAdjustCh:
+	// 根据反馈调整重新提交间隔。
+	if adjust.inc {
+		before := recommit
+		target := float64(recommit.Nanoseconds()) / adjust.ratio
+		recommit = recalcRecommit(minRecommit, recommit, target, true)
+		log.Trace("增加矿工重新提交间隔", "从", before, "到", recommit)
+	} else {
+		before := recommit
+		recommit = recalcRecommit(minRecommit, recommit, float64(minRecommit.Nanoseconds()), false)
+		log.Trace("减少矿工重新提交间隔", "从", before, "到", recommit)
+	}
+	if w.resubmitHook != nil {
+		w.resubmitHook(minRecommit, recommit)
+	}
+```
 
 
 
