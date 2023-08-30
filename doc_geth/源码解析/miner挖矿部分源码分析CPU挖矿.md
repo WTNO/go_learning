@@ -1078,5 +1078,81 @@ func (h *handler) minedBroadcastLoop() {
 
 一旦接受到事件，则立即将广播。首随机广播给部分节点❼，再重新广播给不存在此区块的其他节点❽。
 
+```go
+// Commit block and state to database.
+_, err := w.chain.WriteBlockAndSetHead(block, receipts, logs, task.state, true)
+if err != nil {
+	log.Error("Failed writing block to chain", "err", err)
+	continue
+}
+log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash,
+	"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
 
-同时，也需要通知程序内部的其他子系统，发送事件。新存储的区块，有可能导致切换链分支。如果变化，则队伍是发送 ChainSideEvent 事件。如果没有切换，则说明新区块仍然在当前的最长链上。对外发送 ChainEvent 和 ChainHeadEvent事件❾。新区块并非立即稳定，暂时存入到未确认区块集中。可这个 unconfirmed 仅仅是记录，但尚未具体使用。
+// Broadcast the block and announce chain insertion event
+w.mux.Post(core.NewMinedBlockEvent{Block: block}) //❾
+```
+
+同时，也需要通知程序内部的其他子系统，发送事件。新存储的区块，有可能导致切换链分支。如果变化，则队伍是发送 ChainSideEvent 事件。如果没有切换，则说明新区块仍然在当前的最长链上。对外发送 ChainEvent 和 ChainHeadEvent事件❾。新区块并非立即稳定，暂时存入到未确认区块集中。~~可这个 unconfirmed 仅仅是记录，但尚未具体使用。~~
+
+## 总结
+至此，已经讲解完以太坊挖出一个新区块所经历的各个环节。下面是一张流程图是对挖矿环节的细化，可以边看图便对比阅读此文。同时在讲解时，并没有涉及共识内部逻辑、以及提交交易到虚拟机执行内容。这些内容不是挖矿流程的重点，共识部分将在一下次讲解共识时细说。
+
+<img src="../img/挖矿流程图.webp">
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
