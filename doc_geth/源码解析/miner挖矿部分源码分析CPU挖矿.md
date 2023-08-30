@@ -978,20 +978,105 @@ func (w *worker) taskLoop() {
 
 随后，在共识规则下开始寻找Nonce，一旦找到Nonce，则发送给 resutlCh。同时，如果想取消挖矿任务，只需要关闭 stopCh。而在每次开始挖矿寻找Nonce前，便会关闭 stopCh 将当前进行中的挖矿任务终止❹。
 
+### 等待挖矿结果 Nonce
+上一步已经开始挖矿，寻找Nonce。下一步便是等待挖矿结束，在 resultLoop 中，一直在等待执行结果❶。
+```go
+// resultLoop 是一个独立的 goroutine，用于处理封装结果的提交并将相关数据刷新到数据库中。
+func (w *worker) resultLoop() {
+	defer w.wg.Done()
+	for {
+		select {
+		case block := <-w.resultCh: //❶
+			// 当接收到空结果时，进行短路处理。
+			if block == nil {
+				continue
+			}
+			// 当接收到由于重新提交导致的重复结果时，进行短路处理。
+			if w.chain.HasBlock(block.Hash(), block.NumberU64()) { //❷
+				continue
+			}
+			var (
+				sealhash = w.engine.SealHash(block.Header())
+				hash     = block.Hash()
+			)
+			w.pendingMu.RLock()
+			task, exist := w.pendingTasks[sealhash]
+			w.pendingMu.RUnlock()
+			if !exist { //❸
+				log.Error("找到区块但没有相关待处理任务", "number", block.Number(), "sealhash", sealhash, "hash", hash)
+				continue
+			}
+			// 不同的区块可能共享相同的 sealhash，在此进行深拷贝以防止写-写冲突。
+			var (
+				receipts = make([]*types.Receipt, len(task.receipts))
+				logs     []*types.Log
+			)
+			for i, taskReceipt := range task.receipts { //❹
+				receipt := new(types.Receipt)
+				receipts[i] = receipt
+				*receipt = *taskReceipt
+
+				// 添加区块位置字段
+				receipt.BlockHash = hash
+				receipt.BlockNumber = block.Number()
+				receipt.TransactionIndex = uint(i)
+
+				// 更新所有日志中的区块哈希，因为现在可用，而不是在创建各个交易的收据/日志时。
+				receipt.Logs = make([]*types.Log, len(taskReceipt.Logs))
+				for i, taskLog := range taskReceipt.Logs {
+					log := new(types.Log)
+					receipt.Logs[i] = log
+					*log = *taskLog
+					log.BlockHash = hash
+				}
+				logs = append(logs, receipt.Logs...)
+			}
+			// 将区块和状态提交到数据库。
+			_, err := w.chain.WriteBlockAndSetHead(block, receipts, logs, task.state, true)
+			if err != nil {
+				log.Error("将区块写入链失败", "err", err)
+				continue
+			}
+			log.Info("成功封装新区块", "number", block.Number(), "sealhash", sealhash, "hash", hash,
+				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
+
+			// 广播区块并宣布链插入事件
+			w.mux.Post(core.NewMinedBlockEvent{Block: block}) //❻
+
+		case <-w.exitCh:
+			return
+		}
+	}
+}
+```
+
+一旦找到Nonce，则说明挖出了新区块。
+
+### 存储与广播挖出的新块
+挖矿结果已经是一个包含正确Nonce 的新区块。在正式存储新区块前，需要检查区块是否已经存在，存在则不继续处理❷。
+
+也许挖矿任务已被取消，如果Pending Tasks 中不存在区块对应的挖矿任务信息，则说明任务已被取消，就不需要继续处理❸。从挖矿任务中，整理交易回执，补充缺失信息，并收集所有区块事件日志信息❹。
+
+随后，将区块所有信息写入本地数据库❺，对外发送挖出新块事件❻。在 eth 包中会监听并订阅此事件。
+
+> 上方对应代码见上一小节
+
+```go
+// eth/handler.go
+// minedBroadcastLoop函数将挖掘的区块发送给连接的节点。
+func (h *handler) minedBroadcastLoop() {
+	defer h.wg.Done()
+
+	for obj := range h.minedBlockSub.Chan() {
+		if ev, ok := obj.Data.(core.NewMinedBlockEvent); ok {
+			h.BroadcastBlock(ev.Block, true)  // 首先将区块传播给节点 ❼
+			h.BroadcastBlock(ev.Block, false) // 然后再向其他节点宣布 ❽
+		}
+	}
+}
+```
+
+一旦接受到事件，则立即将广播。首随机广播给部分节点❼，再重新广播给不存在此区块的其他节点❽。
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+同时，也需要通知程序内部的其他子系统，发送事件。新存储的区块，有可能导致切换链分支。如果变化，则队伍是发送 ChainSideEvent 事件。如果没有切换，则说明新区块仍然在当前的最长链上。对外发送 ChainEvent 和 ChainHeadEvent事件❾。新区块并非立即稳定，暂时存入到未确认区块集中。可这个 unconfirmed 仅仅是记录，但尚未具体使用。
