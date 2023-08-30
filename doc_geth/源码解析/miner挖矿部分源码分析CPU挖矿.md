@@ -763,17 +763,56 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 
 > ❸❺处对应的代码没找到，已经改写逻辑？
 
+### 准备上下文环境
+为了方便的共享当前新区块的信息，是专门定义了一个 environment ，专用于记录和当前挖矿工作相关内容。为即将开始的挖矿，先创建一份新的上下文环境信息。
+```go
+// Could potentially happen if starting to mine in an odd state.
+// Note genParams.coinbase can be different with header.Coinbase
+// since clique algorithm can modify the coinbase field in header.
+env, err := w.makeEnv(parent, header, genParams.coinbase)
+if err != nil {
+	log.Error("Failed to create sealing context", "err", err)
+	return nil, err
+}
+```
 
+上下文环境信息中，记录着此新区块信息，分别有：
+1. state： 状态DB，这个状态DB继承自父块。每笔交易的处理，实际上是在改变这个状态DB。
+2. ~~ancestors： 祖先区块集，用于检测叔块是否合法。~~
+3. ~~family: 近亲区块集，用于检测叔块是否合法。~~
+4. ~~uncles：已合法加入的叔块集。~~
+5. ~~tcount： 当请挖矿周期内已提交的交易数。~~
+6. gasPool： 新区块可用燃料池。
+7. header： 新区块区块头。
+8. txs: 已提交的交易集合。
+9. receipts： 已提交交易产生的交易回执集合。
 
+makeEnv方法就是在初始化好上述信息。
+```go
+// makeEnv 创建一个用于封装区块的新环境。
+func (w *worker) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address) (*environment, error) {
+	// 获取父状态以便在其上执行，并为矿工启动预取器以加快区块封装速度。
+	state, err := w.chain.StateAt(parent.Root)
+	if err != nil {
+		return nil, err
+	}
+	state.StartPrefetcher("miner")
 
+	// 注意传入的coinbase可能与header.Coinbase不同。
+	env := &environment{
+		signer:   types.MakeSigner(w.chainConfig, header.Number, header.Time),
+		state:    state,
+		coinbase: coinbase,
+		header:   header,
+	}
+	// 跟踪返回错误的交易，以便将其删除
+	env.tcount = 0
+	return env, nil
+}
+```
 
-
-
-
-
-
-
-
+### 选择叔块
+前面不断将非分支上的区块存放在叔块集中。在打包新块选择叔块时，将从叔块集中选择适合的叔块。
 
 
 
