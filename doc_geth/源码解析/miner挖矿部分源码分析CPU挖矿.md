@@ -811,16 +811,60 @@ func (w *worker) makeEnv(parent *types.Header, header *types.Header, coinbase co
 }
 ```
 
-### 选择叔块
-前面不断将非分支上的区块存放在叔块集中。在打包新块选择叔块时，将从叔块集中选择适合的叔块。
+### ~~选择叔块~~
+~~前面不断将非分支上的区块存放在叔块集中。在打包新块选择叔块时，将从叔块集中选择适合的叔块。~~
 
+> `worker` 中已经删除了 `localUncles` 、 `remoteUncles` 两个字段
 
+> ### 以太坊中的分支和叔块是什么关系?
+> 
+> 以太坊中的分支（Fork）和叔块（Uncle Block）之间有一定的关系。  
+> 
+> 当多个矿工在同一时间内解决了区块的哈希难题时，会出现分支。在分支中，只有一个区块能被确认为主区块，其他区块则成为叔块。这些叔块与主区块具有相同的父区块，但由于网络延迟等原因未能及时传播到整个网络中被确认为主区块。  
+> 
+> 叔块的存在有助于减少分支的发生。当一个矿工解决了哈希难题并广播了区块时，其他矿工可能已经在同一时间内解决了相同的难题。这样就会出现分支，其中一个区块成为主区块，而其他区块成为叔块。通过允许叔块的存在，矿工们意识到即使他们的区块未能成为主区块，它们仍然可以获得一定的奖励。这样可以减少矿工为了争夺主区块而分散算力的情况，提高了整个网络的效率和稳定性。
+> 
+> 叔块的存在也有助于增加区块链网络的安全性和去中心化程度。通过允许叔块存在，矿工可以获得一定的奖励，即使他们的区块最终未能成为主区块。这鼓励了更多的矿工参与到网络中，增加了网络的算力和安全性。
 
+### 提交交易
+区块头已准备就绪，此刻开始从交易池拉取待处理的交易。将交易根据交易发送者分为两类，本地账户交易 localTxs 和外部账户交易 remoteTxs。本地交易优先不仅在交易池交易排队如此，在交易打包到区块中也是如此。本地交易优先，先将本地交易提交❸，再将外部交易提交❹。
+```go
+// fillTransactions 函数从txpool中检索待处理的交易并填充到给定的封装块中。
+// 交易选择和排序策略可以在将来通过插件进行自定义。
+func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment) error {
+	// 将待处理的交易分为本地交易和远程交易
+	// 填充块中的所有可用待处理交易。
+	pending := w.eth.TxPool().Pending(true) //❶
+	/*blobtxs := w.eth.BlobPool().Pending(
+		uint256.MustFromBig(env.header.BaseFee),
+		uint256.MustFromBig(misc.CalcBlobFee(*env.header.ExcessDataGas)),
+	)
+	log.Trace("副作用日志，非常棒", "blobs", len(blobtxs))*/
 
+	localTxs, remoteTxs := make(map[common.Address][]*types.Transaction), pending //❷
+	for _, account := range w.eth.TxPool().Locals() {
+		if txs := remoteTxs[account]; len(txs) > 0 {
+			delete(remoteTxs, account)
+			localTxs[account] = txs
+		}
+	}
+	if len(localTxs) > 0 { //❸
+		txs := types.NewTransactionsByPriceAndNonce(env.signer, localTxs, env.header.BaseFee)
+		if err := w.commitTransactions(env, txs, interrupt); err != nil {
+			return err
+		}
+	}
+	if len(remoteTxs) > 0 { //❹
+		txs := types.NewTransactionsByPriceAndNonce(env.signer, remoteTxs, env.header.BaseFee)
+		if err := w.commitTransactions(env, txs, interrupt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+```
 
-
-
-
+交易处理完毕后，便可进入下一个环节。
 
 
 
