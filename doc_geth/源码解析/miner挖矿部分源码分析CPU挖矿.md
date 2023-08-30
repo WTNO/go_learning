@@ -866,14 +866,117 @@ func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment) err
 
 交易处理完毕后，便可进入下一个环节。
 
+### 提交区块
+在交易处理完毕时，会获得交易回执和变更了区块状态。这些信息已经实时记录在上下文环境 environment 中。
 
+将 environment 中的数据整理，便可根据共识规则构建一个区块。
+```go
+// commit 运行任何事务后的状态修改，组装最终的区块，并在共识引擎运行时提交新的工作。
+// 注意假设允许对传递的环境进行突变，因此先进行深拷贝。
+func (w *worker) commit(env *environment, interval func(), update bool, start time.Time) error {
+	if w.isRunning() {
+		if interval != nil {
+			interval()
+		}
+		// 创建一个本地环境副本，避免与快照状态发生数据竞争。
+		// https://github.com/ethereum/go-ethereum/issues/24299
+		env := env.copy()
+		// 在这里将提款设置为nil，因为这仅在PoW中调用。
+		block, err := w.engine.FinalizeAndAssemble(w.chain, env.header, env.state, env.txs, nil, env.receipts, nil)
+		if err != nil {
+			return err
+		}
+		// 如果我们已经达到合并状态，则忽略
+		if !w.isTTDReached(block.Header()) {
+			select {
+			case w.taskCh <- &task{receipts: env.receipts, state: env.state, block: block, createdAt: time.Now()}:
+				fees := totalFees(block, env.receipts)
+				feesInEther := new(big.Float).Quo(new(big.Float).SetInt(fees), big.NewFloat(params.Ether))
+                log.Info("Commit new sealing work", "number", block.Number(), "sealhash", w.engine.SealHash(block.Header()),
+                "txs", env.tcount, "gas", block.GasUsed(), "fees", feesInEther,
+                "elapsed", common.PrettyDuration(time.Since(start)))
 
+			case <-w.exitCh:
+				log.Info("Worker has exited")
+			}
+		}
+	}
+	if update {
+		w.updateSnapshot(env)
+	}
+	return nil
+}
+```
 
+有了区块，就剩下最重要也是最核心的一步，执行 PoW 运算寻找 Nonce。这里并不是立刻开始寻找，而是发送一个PoW计算任务信号。
+```go
+select {
+case w.taskCh <- &task{receipts: env.receipts, state: env.state, block: block, createdAt: time.Now()}:
+...
+}
+```
 
+### PoW计算寻找Nonce
+之所以称之为挖矿，也是因为寻找Nonce的精髓所在。这是一道数学题，只能暴力破解，不断尝试不同的数字。直到找出一个符合要求的数字，这个数字称之为Nonce。寻找Nonce的过程，称之为挖矿。
 
+寻找Nonce是需要时间的，耗时主要由区块难度决定。在代码设计上，以太坊是在 taskLoop 方法中，一直等待 task ❶。
+```go
+// taskLoop是一个独立的goroutine，用于从生成器获取密封任务并将其推送给共识引擎。
+func (w *worker) taskLoop() {
+	defer w.wg.Done()
+	var (
+		stopCh chan struct{}
+		prev   common.Hash
+	)
 
+	// interrupt用于中断正在进行的密封任务。
+	interrupt := func() {
+		if stopCh != nil {
+			close(stopCh)
+			stopCh = nil
+		}
+	}
+	for {
+		select {
+		case task := <-w.taskCh: //❶
+			if w.newTaskHook != nil {
+				w.newTaskHook(task)
+			}
+			// 拒绝由于重新提交而产生的重复密封任务。
+			sealHash := w.engine.SealHash(task.block.Header()) //❷
+			if sealHash == prev {
+				continue
+			}
+			// 中断先前的密封操作
+			interrupt() //❹
+			stopCh, prev = make(chan struct{}), sealHash
 
+			if w.skipSealHook != nil && w.skipSealHook(task) {
+				continue
+			}
+			w.pendingMu.Lock()
+			w.pendingTasks[sealHash] = task //❸
+			w.pendingMu.Unlock()
 
+			if err := w.engine.Seal(w.chain, task.block, w.resultCh, stopCh); err != nil {
+				log.Warn("区块密封失败", "err", err)
+				w.pendingMu.Lock()
+				delete(w.pendingTasks, sealHash)
+				w.pendingMu.Unlock()
+			}
+		case <-w.exitCh:
+			interrupt()
+			return
+		}
+	}
+}
+```
+
+> 由 newWork 调用
+
+当接收到挖矿任务后，先计算出这个区块所对应的一个哈希摘要❷，并登记此哈希对应的挖矿任务❸。登记的用途是方便查找该区块对应的挖矿任务信息，同时在开始新一轮挖矿时，会取消旧的挖矿工作，并从pendingTasks 中删除标记。以便快速作废挖矿任务。
+
+随后，在共识规则下开始寻找Nonce，一旦找到Nonce，则发送给 resutlCh。同时，如果想取消挖矿任务，只需要关闭 stopCh。而在每次开始挖矿寻找Nonce前，便会关闭 stopCh 将当前进行中的挖矿任务终止❹。
 
 
 
