@@ -1391,10 +1391,77 @@ func accumulateRewards(config *params.ChainConfig, state *state.StateDB, header 
 }
 ```
 
+# 区块存储
+这篇文章所说的挖矿环节中的**存储**环节，当矿工通过穷举计算找到了符合难度要求的区块 Nonce 后，标志着新区块已经成功被挖掘。
 
+此时，矿工将在本地将这个合法的区块直接在本地存储，下面具体讲讲，在 geth 中矿工是如何存储自己挖掘的新区块的。
 
+![image](https://img.learnblockchain.cn/book_geth/20200905150822.png)
 
+在上一环节“PoW 寻找 Nonce” 后，已经拥有了完整的区块信息。
 
+![image](https://img.learnblockchain.cn/book_geth/20200905150823.png)
+
+而在“处理本地交易”和“处理远程交易”后，便拥有了完整的区块交易回执清单：
+
+![image](https://img.learnblockchain.cn/book_geth/20200905150824.png)
+
+区块中的每一笔交易在处理后，都会存在一份交易回执。在交易回执中记录着这边交易的执行结果信息，对于交易回执，我们已经在前面的课程有讲解，这里不再复述。
+
+同时在“发放区块奖励”后，区块的状态不会再发生变化，此时，我们就已经拿到了一个可以代表该区块的状态数据。状态`state`，在内存中将记录着本次区块中交易执行后状态所发送的变化信息，包括新增、变更和删除的数据。
+
+前面所说的区块（Block）、交易回执（Receipt）、状态（State）就是本次挖矿的产物，在本地需要存储的也只有这三部分数据。
+
+![image](https://img.learnblockchain.cn/book_geth/20200905150825.png)
+
+这些数据，在挖矿中处理存储的代码如下：
+```go
+// resultLoop 是一个独立的 goroutine，用于处理封装结果的提交并将相关数据刷新到数据库中。
+func (w *worker) resultLoop() {
+	...
+			// 不同的区块可能共享相同的 sealhash，在此进行深拷贝以防止写-写冲突。
+			var (
+				receipts = make([]*types.Receipt, len(task.receipts))
+				logs     []*types.Log
+			)
+			for i, taskReceipt := range task.receipts { //❶
+				receipt := new(types.Receipt)
+				receipts[i] = receipt
+				*receipt = *taskReceipt
+
+				// 添加区块位置字段
+				receipt.BlockHash = hash
+				receipt.BlockNumber = block.Number()
+				receipt.TransactionIndex = uint(i)
+
+				// 更新所有日志中的区块哈希，因为现在可用，而不是在创建各个交易的收据/日志时。
+				receipt.Logs = make([]*types.Log, len(taskReceipt.Logs))
+				for i, taskLog := range taskReceipt.Logs {
+					log := new(types.Log)
+					receipt.Logs[i] = log
+					*log = *taskLog
+					log.BlockHash = hash
+				}
+				logs = append(logs, receipt.Logs...) //❷
+			}
+			// 将区块和状态提交到数据库。 //❸
+			_, err := w.chain.WriteBlockAndSetHead(block, receipts, logs, task.state, true)
+			if err != nil {
+				log.Error("将区块写入链失败", "err", err)
+				continue
+			}
+			log.Info("成功封装新区块", "number", block.Number(), "sealhash", sealhash, "hash", hash,
+				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
+	
+	...
+}
+```
+
+- ❶ 遍历交易回执，给每一个交易回执添加本次区块信息（blockHash，BlockNumber、TransactionIndex），这样就可以在本地记录交易回执和区块间的查找关系。
+- ❷ 同时将交易回执中生成的日志信息提取到一个大集合中，以便作为一个区块日志整体存储。
+- ❸ 开始提交区块（Block）、交易回执（Receipt）、状态（State）和日志（log）到本地数据库中。
+
+在`writeBlockWithState`中，是将所有数据以一个批处理事务写入到数据库中：
 
 
 
