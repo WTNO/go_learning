@@ -1357,7 +1357,38 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 
 **实时结算挖矿奖励和叔块奖励**
 ```go
+// Finalize函数实现了consensus.Engine接口，用于累积块和叔块的奖励。
+func (ethash *Ethash) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
+    // 累积任何块和叔块的奖励
+    accumulateRewards(chain.Config(), state, header, uncles)
+}
 
+// AccumulateRewards函数给给定块的coinbase添加挖矿奖励。
+// 总奖励由静态块奖励和包含的叔块奖励组成。每个叔块块的coinbase也会得到奖励。
+func accumulateRewards(config *params.ChainConfig, state *state.StateDB, header *types.Header, uncles []*types.Header) {
+	// 根据链的进展选择正确的块奖励
+	blockReward := FrontierBlockReward
+	if config.IsByzantium(header.Number) {
+		blockReward = ByzantiumBlockReward
+	}
+	if config.IsConstantinople(header.Number) {
+		blockReward = ConstantinopleBlockReward
+	}
+	// 累积矿工和任何包含的叔块的奖励
+	reward := new(big.Int).Set(blockReward)
+	r := new(big.Int)
+	for _, uncle := range uncles {
+		r.Add(uncle.Number, big8)
+		r.Sub(r, header.Number)
+		r.Mul(r, blockReward)
+		r.Div(r, big8)
+		state.AddBalance(uncle.Coinbase, r)
+
+		r.Div(blockReward, big32)
+		reward.Add(reward, r)
+	}
+	state.AddBalance(header.Coinbase, reward)
+}
 ```
 
 
