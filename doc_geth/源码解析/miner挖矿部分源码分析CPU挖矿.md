@@ -1462,13 +1462,89 @@ func (w *worker) resultLoop() {
 - ❸ 开始提交区块（Block）、交易回执（Receipt）、状态（State）和日志（log）到本地数据库中。
 
 在`writeBlockWithState`中，是将所有数据以一个批处理事务写入到数据库中：
+```go
+// writeBlockAndSetHead是WriteBlockAndSetHead的内部实现。
+// 这个函数期望chain被持有。
+func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types.Receipt, logs []*types.Log, state *state.StateDB, emitHeadEvent bool) (status WriteStatus, err error) {
+    if err := bc.writeBlockWithState(block, receipts, state); err != nil {
+        return NonStatTy, err
+    }
+	
+	...
+
+	// Set new head.
+	if status == CanonStatTy {
+        bc.writeHeadBlock(block)
+    }
+	
+	...
+}
+
+// writeBlockWithState writes block, metadata and corresponding state data to the
+// database.
+func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, state *state.StateDB) error {
+	...
+    // 无论规范状态如何，将区块本身写入数据库。
+    //
+    // 注意，区块的所有组成部分（td、hash->number映射、头、体、收据）应该是原子性写入的。BlockBatch用于包含所有组件。
+    blockBatch := bc.db.NewBatch()
+    rawdb.WriteTd(blockBatch, block.Hash(), block.NumberU64(), externTd) // 将td写入数据库
+    rawdb.WriteBlock(blockBatch, block) // 将区块写入数据库
+    rawdb.WriteReceipts(blockBatch, block.Hash(), block.NumberU64(), receipts) // 将收据写入数据库
+    rawdb.WritePreimages(blockBatch, state.Preimages()) // 将预图像写入数据库
+    if err := blockBatch.Write(); err != nil {
+        log.Crit("Failed to write block into disk", "err", err) // 写入数据库失败时记录错误日志
+    }
+    // 将所有缓存的状态更改提交到底层内存数据库。
+    root, err := state.Commit(bc.chainConfig.IsEIP158(block.Number()))
+    if err != nil {
+        return err
+    }
+    // 如果我们运行的是归档节点，总是刷新
+    if bc.cacheConfig.TrieDirtyDisabled {
+        return bc.triedb.Commit(root, false)
+    }
+    // 完整但不是归档节点，进行适当的垃圾回收
+    bc.triedb.Reference(root, common.Hash{}) // 元数据引用以保持trie存活
+    bc.triegc.Push(root, -int64(block.NumberU64())) // 将根节点推入垃圾回收队列，设置负数表示该根节点不可删除
+    ...
+}
+```
+
+在一个事务中，分别向数据库中写入了区块难度、区块、交易回执、Preimages（key映射），最后将 state 提交。
+
+那么，geth 是如何在本地将这些数据存放到键值数据库 levelDB 中的呢？这里，给大家整理一份键值信息表。
+
+| Key                       | Value                             | 说明                                           |
+| ------------------------- | --------------------------------- | ---------------------------------------------- |
+| “b”.blockNumber.blockHash | blockBody： uncles + transactions | 通过区块哈希和高度存储对应的区块叔块和交易信息 |
+| "H".blockHash             | blockNumber                       | 通过区块哈希记录对于的区块高度                 |
+| “h”.blockNumber.blockHash | blockHeader                       | 通过区块哈希和高度存储对于的区块头             |
+| ”r“.blockNumber           | receipts                          | 通过区块高度记录区块的交易回执记录             |
+| "h".blockNumber           | blockHash                         | 区块高度对应的区块哈希                         |
+| ”l“.txHash                | blockNumber                       | 记录交易哈希所在的区块高度                     |
+| ”LastBlock“               | blockHash                         | 更新最后一个区块哈希值                         |
+| ”LastHeader“              | blockHash                         | 更新最后一个区块头所在位置                     |
+
+> 注意，上面的 value 信息，是需要序列化为 bytes 才能存储到 leveldb 中，序列化是以太坊自定义的 RLP 编码技术。你有没有想过它为何要添加一个前缀呢？比如”b“、”H“等等，第一个好处是将不同数据分类，另一个重要的原因是在leveldb中数据是以 key 值排序存储的，这样在按顺序遍历区块头、查询同类型数据时，读的性能会更好。
+
+正是因为在我们在本地保存了区块数据的一些映射关系，我们才能快速的从本地数据库中只需要提供少量的信息就就能组合一个或者多个键值关系查询到目标数据。下面我列举了一些常见的以太坊API，你觉得该如何从DB中查找出数据呢？
+
+1. 通过交易哈希获取交易信息：
+    ```js
+    eth_getTransactionByHash("0xb903239f8543d04b5dc1ba6579132b143087c68db1b2168786408fcbce568238")
+    ```
+2. 查询最后一个区块信息：
+    ```js
+    eth_getBlockByNumber("latest")
+    ```
+3. 通过交易哈希获取交易回执
+    ```js
+    eth_getTransactionReceipt("0x444172bef57ad978655171a8af2cfd89baa02a97fcb773067aef7794d6913374")
+    ```
 
 
-
-
-
-
-
+![image](https://img.learnblockchain.cn/book_geth/20200905150826.png)
 
 
 
