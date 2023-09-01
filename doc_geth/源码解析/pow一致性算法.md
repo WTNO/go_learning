@@ -65,11 +65,100 @@ type Ethash struct {
 Ethhash是实现PoW的具体实现，由于要使用到大量的数据集，所有有两个指向lru的指针。并且通过threads控制挖矿线程数。并在测试模式或fake模式下，简单快速处理，使之快速得到结果。
 
 Athor方法获取了挖出这个块的矿工地址。
+```go
+// Author 实现了 consensus.Engine 接口，通过验证工作量证明来确定区块的 coinbase 地址作为区块的作者。
+func (ethash *Ethash) Author(header *types.Header) (common.Address, error) {
+	return header.Coinbase, nil
+}
+```
 
+VerifyHeader 用于校验区块头部信息是否符合ethash共识引擎规则。
+```go
+// VerifyHeader 检查一个头部是否符合以太坊 ethash 引擎的共识规则。
+func (ethash *Ethash) VerifyHeader(chain consensus.ChainHeaderReader, header *types.Header) error {
+	// 如果头部已知，或者其父块未知，则进行短路处理(直接返回)
+	number := header.Number.Uint64()
+	if chain.GetHeader(header.Hash(), number) != nil {
+		return nil
+	}
+	parent := chain.GetHeader(header.ParentHash, number-1)
+	if parent == nil { // 获取父结点失败
+		return consensus.ErrUnknownAncestor
+	}
+	// 通过了基本的检查，进行正式的验证
+	return ethash.verifyHeader(chain, header, parent, false, time.Now().Unix())
+}
+```
 
+然后再看看verifyHeader的实现,
+```go
+// verifyHeader检查一个头部是否符合以太坊ethash引擎的共识规则。
+// 参考YP第4.3.4节“区块头有效性”
+func (ethash *Ethash) verifyHeader(chain consensus.ChainHeaderReader, header, parent *types.Header, uncle bool, unixNow int64) error {
+	// 确保头部的额外数据部分长度合理
+	if uint64(len(header.Extra)) > params.MaximumExtraDataSize {
+		return fmt.Errorf("额外数据过长: %d > %d", len(header.Extra), params.MaximumExtraDataSize)
+	}
+	// 验证头部的时间戳
+	if !uncle {
+		if header.Time > uint64(unixNow+allowedFutureBlockTimeSeconds) {
+			return consensus.ErrFutureBlock
+		}
+	}
+	if header.Time <= parent.Time {
+		return errOlderBlockTime
+	}
+	// 根据时间戳和父区块的难度，验证区块的难度
+	expected := ethash.CalcDifficulty(chain, header.Time, parent)
 
-
-
+	if expected.Cmp(header.Difficulty) != 0 {
+		return fmt.Errorf("无效的难度: 当前 %v，期望 %v", header.Difficulty, expected)
+	}
+	// 验证 gas 限制是否 <= 2^63-1
+	if header.GasLimit > params.MaxGasLimit {
+		return fmt.Errorf("无效的 gasLimit: 当前 %v，最大值 %v", header.GasLimit, params.MaxGasLimit)
+	}
+	// 验证 gasUsed 是否 <= gasLimit
+	if header.GasUsed > header.GasLimit {
+		return fmt.Errorf("无效的 gasUsed: 当前 %d，gasLimit %d", header.GasUsed, header.GasLimit)
+	}
+	// 验证区块的 gas 使用情况和（如果适用）验证基础费用。
+	if !chain.Config().IsLondon(header.Number) {
+		// 在 EIP-1559 软分叉之前，验证 BaseFee 不存在。
+		if header.BaseFee != nil {
+			return fmt.Errorf("分叉前无效的 baseFee: 当前 %d，期望为 'nil'", header.BaseFee)
+		}
+		if err := misc.VerifyGaslimit(parent.GasLimit, header.GasLimit); err != nil {
+			return err
+		}
+	} else if err := misc.VerifyEIP1559Header(chain.Config(), parent, header); err != nil {
+		// 验证头部的 EIP-1559 属性。
+		return err
+	}
+	// 验证区块号是父区块号加1
+	if diff := new(big.Int).Sub(header.Number, parent.Number); diff.Cmp(big.NewInt(1)) != 0 {
+		return consensus.ErrInvalidNumber
+	}
+	if chain.Config().IsShanghai(header.Number, header.Time) {
+		return errors.New("ethash不支持shanghai硬分叉")
+	}
+	if chain.Config().IsCancun(header.Number, header.Time) {
+		return errors.New("ethash不支持cancun硬分叉")
+	}
+	// 为测试添加一些伪检查
+	if ethash.fakeDelay != nil {
+		time.Sleep(*ethash.fakeDelay)
+	}
+	if ethash.fakeFail != nil && *ethash.fakeFail == header.Number.Uint64() {
+		return errors.New("无效的测试者pow")
+	}
+	// 如果所有检查通过，验证硬分叉的特殊字段
+	if err := misc.VerifyDAOHeaderExtraData(chain.Config(), header); err != nil {
+		return err
+	}
+	return nil
+}
+```
 
 
 
