@@ -160,14 +160,147 @@ func (ethash *Ethash) verifyHeader(chain consensus.ChainHeaderReader, header, pa
 }
 ```
 
+Ethash通过CalcDifficulty函数计算下一个区块难度，分别为不同阶段的难度创建了不同的难度计算方法，这里暂不展开描述
+```go
+// CalcDifficulty 是难度调整算法。在给定父区块的时间和难度的情况下，
+// 它返回新区块在创建时应该具有的难度。
+func (ethash *Ethash) CalcDifficulty(chain consensus.ChainHeaderReader, time uint64, parent *types.Header) *big.Int {
+	return CalcDifficulty(chain.Config(), time, parent)
+}
 
+// CalcDifficulty 是难度调整算法。在给定父区块的时间和难度的情况下，
+// 它返回新区块在创建时应该具有的难度。
+func CalcDifficulty(config *params.ChainConfig, time uint64, parent *types.Header) *big.Int {
+	next := new(big.Int).Add(parent.Number, big1)
+	switch {
+	case config.IsGrayGlacier(next):
+		return calcDifficultyEip5133(time, parent)
+	case config.IsArrowGlacier(next):
+		return calcDifficultyEip4345(time, parent)
+	case config.IsLondon(next):
+		return calcDifficultyEip3554(time, parent)
+	case config.IsMuirGlacier(next):
+		return calcDifficultyEip2384(time, parent)
+	case config.IsConstantinople(next):
+		return calcDifficultyConstantinople(time, parent)
+	case config.IsByzantium(next):
+		return calcDifficultyByzantium(time, parent)
+	case config.IsHomestead(next):
+		return calcDifficultyHomestead(time, parent)
+	default:
+		return calcDifficultyFrontier(time, parent)
+	}
+}
+```
 
+VerifyHeaders和VerifyHeader类似，只是VerifyHeaders进行批量校验操作。创建多个goroutine用于执行校验操作，再创建一个goroutine用于赋值控制任务分配和结果获取。最后返回一个结果channel
+```go
+// VerifyHeaders类似于VerifyHeader，但可以并发地验证一组头部。
+// 该方法返回一个用于中止操作的退出通道和一个用于检索异步验证结果的结果通道。
+func (ethash *Ethash) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*types.Header) (chan<- struct{}, <-chan error) {
+	// 如果我们正在运行一个模拟的完全引擎，接受任何输入都是有效的
+	if ethash.fakeFull || len(headers) == 0 {
+		abort, results := make(chan struct{}), make(chan error, len(headers))
+		for i := 0; i < len(headers); i++ {
+			results <- nil
+		}
+		return abort, results
+	}
+	abort := make(chan struct{})
+	results := make(chan error, len(headers))
+	unixNow := time.Now().Unix()
 
+	go func() {
+		for i, header := range headers {
+			var parent *types.Header
+			if i == 0 {
+				parent = chain.GetHeader(headers[0].ParentHash, headers[0].Number.Uint64()-1)
+			} else if headers[i-1].Hash() == headers[i].ParentHash {
+				parent = headers[i-1]
+			}
+			var err error
+			if parent == nil {
+				err = consensus.ErrUnknownAncestor
+			} else {
+				err = ethash.verifyHeader(chain, header, parent, false, unixNow)
+			}
+			select {
+			case <-abort:
+				return
+			case results <- err:
+			}
+		}
+	}()
+	return abort, results
+}
+```
 
+`VerifyHeaders` 在校验单个区块头的时候使用了 `verifyHeader` 
 
+`VerifyUncles`用于叔块的校验。和校验区块头类似，叔块校验在ModeFullFake模式下直接返回校验成功。获取所有的叔块，然后遍历校验，校验失败即终止，或者校验完成返回。
+```go
+// VerifyUncles函数验证给定块的叔块是否符合以太坊ethash引擎的共识规则。
+func (ethash *Ethash) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	// 如果我们运行的是全功能引擎模拟，接受任何输入作为有效
+	if ethash.fakeFull {
+		return nil
+	}
+	// 验证此块中包含的叔块数量最多为2个
+	if len(block.Uncles()) > maxUncles {
+		return errTooManyUncles
+	}
+	if len(block.Uncles()) == 0 {
+		return nil
+	}
+	// 收集过去的叔块和祖先的集合
+	uncles, ancestors := mapset.NewSet[common.Hash](), make(map[common.Hash]*types.Header)
 
+	number, parent := block.NumberU64()-1, block.ParentHash()
+	for i := 0; i < 7; i++ {
+		ancestorHeader := chain.GetHeader(parent, number)
+		if ancestorHeader == nil {
+			break
+		}
+		ancestors[parent] = ancestorHeader
+		// 如果祖先没有任何叔块，我们不必迭代它们
+		if ancestorHeader.UncleHash != types.EmptyUncleHash {
+			// 还需要将这些叔块添加到禁止列表中
+			ancestor := chain.GetBlock(parent, number)
+			if ancestor == nil {
+				break
+			}
+			for _, uncle := range ancestor.Uncles() {
+				uncles.Add(uncle.Hash())
+			}
+		}
+		parent, number = ancestorHeader.ParentHash, number-1
+	}
+	ancestors[block.Hash()] = block.Header()
+	uncles.Add(block.Hash())
 
+	// 验证每个叔块是否最近，但不是祖先
+	for _, uncle := range block.Uncles() {
+		// 确保每个叔块只获得一次奖励
+		hash := uncle.Hash()
+		if uncles.Contains(hash) {
+			return errDuplicateUncle
+		}
+		uncles.Add(hash)
 
+		// 确保叔块具有有效的祖先
+		if ancestors[hash] != nil {
+			return errUncleIsAncestor
+		}
+		if ancestors[uncle.ParentHash] == nil || uncle.ParentHash == block.ParentHash() {
+			return errDanglingUncle
+		}
+		if err := ethash.verifyHeader(chain, uncle, ancestors[uncle.ParentHash], true, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+```
 
 
 
