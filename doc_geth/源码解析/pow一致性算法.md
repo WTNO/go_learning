@@ -302,15 +302,69 @@ func (ethash *Ethash) VerifyUncles(chain consensus.ChainReader, block *types.Blo
 }
 ```
 
+Prepare实现共识引擎的Prepare接口，用于填充区块头的难度字段，使之符合ethash协议。这个改变是在线的。
+```go
+// Prepare 实现了 consensus.Engine 接口，用于初始化一个头部的 difficulty 字段，以符合 ethash 协议。更改是在代码中完成的。
 
+func (ethash *Ethash) Prepare(chain consensus.ChainHeaderReader, header *types.Header) error {
+	parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+	if parent == nil {
+		return consensus.ErrUnknownAncestor // 如果找不到父区块，则返回未知的祖先错误
+	}
+	header.Difficulty = ethash.CalcDifficulty(chain, header.Time, parent) // 计算并设置头部的难度字段
+	return nil
+}
+```
 
+`Finalize`实现共识引擎的Finalize接口,奖励挖到区块账户和叔块账户，并填充状态树的根的值。并返回新的区块。
+```go
+// Finalize实现了consensus.Engine接口，用于累积区块和叔块的奖励。
+func (ethash *Ethash) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
+    // 累积区块和叔块的奖励
+    accumulateRewards(chain.Config(), state, header, uncles)
+}
 
+// AccumulateRewards 函数将给定区块的 coinbase 账户增加挖矿奖励。
+// 总奖励包括静态的区块奖励和包含的叔叔区块的奖励。
+// 每个叔叔区块的 coinbase 账户也会被奖励。
+func accumulateRewards(config *params.ChainConfig, state *state.StateDB, header *types.Header, uncles []*types.Header) {
+	// 根据链的进展选择正确的区块奖励
+	blockReward := FrontierBlockReward
+	if config.IsByzantium(header.Number) {
+		blockReward = ByzantiumBlockReward
+	}
+	if config.IsConstantinople(header.Number) {
+		blockReward = ConstantinopleBlockReward
+	}
+	// 累积矿工和任何包含的叔叔区块的奖励
+	reward := new(big.Int).Set(blockReward)
+	r := new(big.Int)
+	for _, uncle := range uncles {
+		r.Add(uncle.Number, big8)
+		r.Sub(r, header.Number)
+		r.Mul(r, blockReward)
+		r.Div(r, big8)
+		state.AddBalance(uncle.Coinbase, r) // 增加叔叔区块的奖励到 coinbase 账户
 
+		r.Div(blockReward, big32)
+		reward.Add(reward, r)
+	}
+	state.AddBalance(header.Coinbase, reward) // 增加矿工的奖励到 coinbase 账户
+}
+```
 
+## Seal函数实现分析
+~~在CPU挖矿部分，CpuAgent的mine函数，执行挖矿操作的时候调用了Seal函数。~~
 
+Seal函数尝试找出一个满足区块难度的nonce值。 在ModeFake和ModeFullFake模式下，快速返回，并且直接将nonce值取0。 在shared PoW模式下，使用shared的Seal函数。 开启threads个goroutine进行挖矿(查找符合条件的nonce值)。
+```go
 
-
-
+// Seal 为给定的输入区块生成一个新的封闭请求，并将结果推送到给定的通道中。
+// 对于 ethash 引擎，该方法将会触发 panic，因为不再支持封闭操作。
+func (ethash *Ethash) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
+    panic("ethash (pow) 不再支持封闭操作")
+}
+```
 
 
 
