@@ -352,4 +352,3 @@ func (beacon *Beacon) Seal(chain consensus.ChainHeaderReader, block *types.Block
 
 
 
-
