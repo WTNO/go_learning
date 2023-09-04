@@ -171,13 +171,113 @@ func (beacon *Beacon) verifyHeader(chain consensus.ChainHeaderReader, header, pa
 }
 ```
 
+Beacon通过`CalcDifficulty`函数计算下一个区块难度，分别为不同阶段的难度创建了不同的难度计算方法，这里暂不展开描述
+```go
+// CalcDifficulty是难度调整算法。根据父块的时间和难度，它返回新块在给定时间创建时应具有的难度。
+func (beacon *Beacon) CalcDifficulty(chain consensus.ChainHeaderReader, time uint64, parent *types.Header) *big.Int {
+	// 如果尚未触发过渡，则使用传统规则进行计算
+	if reached, _ := IsTTDReached(chain, parent.Hash(), parent.Number.Uint64()); !reached {
+		return beacon.ethone.CalcDifficulty(chain, time, parent)
+	}
+	return beaconDifficulty
+}
+```
 
+VerifyHeaders和VerifyHeader类似，只是VerifyHeaders进行批量校验操作。创建多个goroutine用于执行校验操作，再创建一个goroutine用于赋值控制任务分配和结果获取。最后返回一个结果channel
+```go
+// VerifyHeaders类似于VerifyHeader，但是可以并发地验证一批区块头。
+// 该方法返回一个退出通道以中止操作，并返回一个结果通道以检索异步验证结果。
+// VerifyHeaders期望区块头是有序且连续的。
+func (beacon *Beacon) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*types.Header) (chan<- struct{}, <-chan error) {
+	preHeaders, postHeaders, err := beacon.splitHeaders(chain, headers)
+	if err != nil {
+		return make(chan struct{}), errOut(len(headers), err)
+	}
+	if len(postHeaders) == 0 {
+		return beacon.ethone.VerifyHeaders(chain, headers)
+	}
+	if len(preHeaders) == 0 {
+		return beacon.verifyHeaders(chain, headers, nil)
+	}
+	// 过渡点存在于中间，将区块头分成两批，并为它们应用不同的验证规则。
+	var (
+		abort   = make(chan struct{})
+		results = make(chan error, len(headers))
+	)
+	go func() {
+		var (
+			old, new, out      = 0, len(preHeaders), 0
+			errors             = make([]error, len(headers))
+			done               = make([]bool, len(headers))
+			oldDone, oldResult = beacon.ethone.VerifyHeaders(chain, preHeaders)
+			newDone, newResult = beacon.verifyHeaders(chain, postHeaders, preHeaders[len(preHeaders)-1])
+		)
+		// 收集结果
+		for {
+			for ; done[out]; out++ {
+				results <- errors[out]
+				if out == len(headers)-1 {
+					return
+				}
+			}
+			select {
+			case err := <-oldResult:
+				if !done[old] { // 跳过已经验证失败的TTD
+					errors[old], done[old] = err, true
+				}
+				old++
+			case err := <-newResult:
+				errors[new], done[new] = err, true
+				new++
+			case <-abort:
+				close(oldDone)
+				close(newDone)
+				return
+			}
+		}
+	}()
+	return abort, results
+}
 
-
-
-
-
-
+// verifyHeaders类似于verifyHeader，但是可以并发地验证一批头部。
+// 该方法返回一个用于中止操作的quit通道和一个用于检索异步验证结果的结果通道。
+// 如果相关的头部尚未在数据库中，将传递一个额外的父头部。
+func (beacon *Beacon) verifyHeaders(chain consensus.ChainHeaderReader, headers []*types.Header, ancestor *types.Header) (chan<- struct{}, <-chan error) {
+	var (
+		abort   = make(chan struct{})
+		results = make(chan error, len(headers))
+	)
+	go func() {
+		for i, header := range headers {
+			var parent *types.Header
+			if i == 0 {
+				if ancestor != nil {
+					parent = ancestor
+				} else {
+					parent = chain.GetHeader(headers[0].ParentHash, headers[0].Number.Uint64()-1)
+				}
+			} else if headers[i-1].Hash() == headers[i].ParentHash {
+				parent = headers[i-1]
+			}
+			if parent == nil {
+				select {
+				case <-abort:
+					return
+				case results <- consensus.ErrUnknownAncestor:
+				}
+				continue
+			}
+			err := beacon.verifyHeader(chain, header, parent)
+			select {
+			case <-abort:
+				return
+			case results <- err:
+			}
+		}
+	}()
+	return abort, results
+}
+```
 
 
 
