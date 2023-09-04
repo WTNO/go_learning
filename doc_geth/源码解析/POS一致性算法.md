@@ -279,15 +279,76 @@ func (beacon *Beacon) verifyHeaders(chain consensus.ChainHeaderReader, headers [
 }
 ```
 
+`VerifyUncles`用于叔块的校验。和校验区块头类似，叔块校验在ModeFullFake模式下直接返回校验成功。获取所有的叔块，然后遍历校验，校验失败即终止，或者校验完成返回。
+```go
+// VerifyUncles函数用于验证给定区块的叔块是否符合以太坊共识引擎的共识规则。
+func (beacon *Beacon) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	if !beacon.IsPoSHeader(block.Header()) {
+		return beacon.ethone.VerifyUncles(chain, block)
+	}
+	// 验证是否存在叔块。在Beacon中明确禁用了叔块。
+	if len(block.Uncles()) > 0 {
+		return errTooManyUncles
+	}
+	return nil
+}
+```
 
+Prepare实现共识引擎的Prepare接口，用于填充区块头的难度字段，使之符合ethash协议。这个改变是在线的。
+```go
+// Prepare函数实现了consensus.Engine接口，用于初始化头部的difficulty字段以符合beacon协议。
+// 更改是在此函数内进行的。
+func (beacon *Beacon) Prepare(chain consensus.ChainHeaderReader, header *types.Header) error {
+	// 还没有触发过过渡，使用传统规则进行准备。
+	reached, err := IsTTDReached(chain, header.ParentHash, header.Number.Uint64()-1)
+	if err != nil {
+		return err
+	}
+	if !reached {
+		return beacon.ethone.Prepare(chain, header)
+	}
+	header.Difficulty = beaconDifficulty
+	return nil
+}
+```
 
+`Finalize`实现共识引擎的Finalize接口,奖励挖到区块账户和叔块账户，并填充状态树的根的值。并返回新的区块。
+```go
+// Finalize实现了consensus.Engine接口，并在其上处理提现交易。
+func (beacon *Beacon) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
+	if !beacon.IsPoSHeader(header) {
+		beacon.ethone.Finalize(chain, header, state, txs, uncles, nil)
+		return
+	}
+	// 提现交易处理。
+	for _, w := range withdrawals {
+		// 将金额从gwei转换为wei。
+		amount := new(big.Int).SetUint64(w.Amount)
+		amount = amount.Mul(amount, big.NewInt(params.GWei))
+		state.AddBalance(w.Address, amount)
+	}
+	// 没有由共识层发行的区块奖励。
+}
+```
 
+## Seal函数实现分析
+在CPU挖矿部分，worker的taskLoop函数，执行挖矿操作的时候调用了Seal函数。
 
-
-
-
-
-
+~~Seal函数尝试找出一个满足区块难度的nonce值。 在ModeFake和ModeFullFake模式下，快速返回，并且直接将nonce值取0。 在shared PoW模式下，使用shared的Seal函数。 开启threads个goroutine进行挖矿(查找符合条件的nonce值)。~~
+```go
+// Seal 生成给定输入块的新密封请求，并将结果推送到给定的通道中。
+//
+// 注意，该方法立即返回，并将以异步方式发送结果。根据共识算法，可能会返回多个结果。
+func (beacon *Beacon) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
+	if !beacon.IsPoSHeader(block.Header()) {
+		return beacon.ethone.Seal(chain, block, results, stop)
+	}
+	// 密封验证由外部共识引擎完成，
+	// 直接返回而不推送任何块。换句话说，
+	// beacon 不会通过 `results` 通道返回任何结果，这可能会永远阻塞接收方的逻辑。
+	return nil
+}
+```
 
 
 
